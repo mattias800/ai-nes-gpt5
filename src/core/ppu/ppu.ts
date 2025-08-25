@@ -170,6 +170,7 @@ export class PPU {
         if (this.scanline >= 0 && this.scanline <= 239) {
           if (this.cycle === 256) this.incY();
           if (this.cycle === 257) this.copyX();
+          if (this.cycle === 260) this.onA12Rise && this.onA12Rise();
         } else if (this.scanline === 261) { // pre-render line
           if (this.cycle >= 280 && this.cycle <= 304) this.copyY();
         }

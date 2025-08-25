@@ -4,6 +4,7 @@ import { PPU } from '@core/ppu/ppu';
 import { NesIO } from '@core/io/nesio';
 import { Cartridge } from '@core/cart/cartridge';
 import type { INesRom } from '@core/cart/ines';
+import { APU } from '@core/apu/apu';
 
 export class NESSystem {
   public bus: CPUBus;
@@ -11,6 +12,7 @@ export class NESSystem {
   public ppu: PPU;
   public io: NesIO;
   public cart: Cartridge;
+  public apu: APU;
 
   constructor(rom: INesRom) {
     this.bus = new CPUBus();
@@ -28,6 +30,11 @@ export class NESSystem {
     this.bus.connectCart((a) => this.cart.readCpu(a), (a, v) => this.cart.writeCpu(a, v));
     this.cpu = new CPU6502(this.bus);
     this.io.setCpuCycleHooks(() => this.cpu.state.cycles, (n) => this.cpu.addCycles(n));
+
+    // Attach APU
+    this.apu = new APU();
+    this.apu.reset();
+    this.io.attachAPU(this.apu);
   }
 
   reset() {
@@ -54,7 +61,10 @@ export class NESSystem {
     this.cpu.step();
     const delta = this.cpu.state.cycles - before;
     // Tick PPU at 3x CPU cycles
-    if (delta > 0) this.ppu.tick(delta * 3);
+    if (delta > 0) {
+      this.ppu.tick(delta * 3);
+      this.apu.tick(delta);
+    }
 
     // Deliver NMI if VBlank started during PPU tick
     if (this.ppu.nmiOccurred && this.ppu.nmiOutput) {

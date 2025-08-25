@@ -9,8 +9,11 @@ export class NesIO {
   private pad2 = new Controller();
   private getCpuCycles: (() => number) | null = null;
   private addCpuCycles: ((n: number) => void) | null = null;
+  private apu: import('@core/apu/apu').APU | null = null;
 
   constructor(public ppu: PPU, private bus: CPUBus) {}
+
+  attachAPU(apu: import('@core/apu/apu').APU) { this.apu = apu; }
 
   setCpuCycleHooks(getter: () => number, adder: (n: number) => void) {
     this.getCpuCycles = getter; this.addCpuCycles = adder;
@@ -28,6 +31,8 @@ export class NesIO {
         return this.pad1.read();
       case 0x4017:
         return this.pad2.read();
+      case 0x4015:
+        return this.apu ? this.apu.read4015() : 0x00;
       default:
         return 0x00;
     }
@@ -57,6 +62,10 @@ export class NesIO {
       case 0x4016: {
         this.pad1.write4016(value);
         this.pad2.write4016(value);
+        break;
+      }
+      case 0x4017: {
+        if (this.apu) this.apu.write4017(value);
         break;
       }
       default:

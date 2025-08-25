@@ -9,7 +9,9 @@ export function cpuWithProgram(bytes: number[], resetVector = 0x8000) {
   bus.connectCart((addr) => {
     if (addr >= 0x8000) return prg[(addr - 0x8000) & 0x7FFF];
     return 0x00;
-  }, (_addr, _v) => {});
+  }, (addr, v) => {
+    if (addr >= 0x8000) prg[(addr - 0x8000) & 0x7FFF] = v & 0xFF;
+  });
   bus.connectIO((_addr) => 0x00, (_addr, _v) => {});
   const cpu = new CPU6502(bus);
   cpu.reset(resetVector);

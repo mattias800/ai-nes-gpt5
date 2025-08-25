@@ -12,6 +12,7 @@
     "isolatedModules": true,
     "outDir": "dist",
     "rootDir": ".",
+    "baseUrl": ".",
     "paths": {
       "@core/*": ["src/core/*"],
       "@host/*": ["src/host/*"],

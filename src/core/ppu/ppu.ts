@@ -164,6 +164,17 @@ export class PPU {
   // --- Timing ---
   tick(ppuCycles: number = 1) {
     for (let i = 0; i < ppuCycles; i++) {
+      const renderingEnabled = (this.mask & 0x18) !== 0; // bg or sprites
+      // Per-dot behavior for scroll increments/copies when rendering
+      if (renderingEnabled) {
+        if (this.scanline >= 0 && this.scanline <= 239) {
+          if (this.cycle === 256) this.incY();
+          if (this.cycle === 257) this.copyX();
+        } else if (this.scanline === 261) { // pre-render line
+          if (this.cycle >= 280 && this.cycle <= 304) this.copyY();
+        }
+      }
+
       this.cycle++;
       if (this.cycle > 340) {
         this.cycle = 0;
@@ -181,6 +192,33 @@ export class PPU {
         }
       }
     }
+  }
+
+  private incY() {
+    // From nesdev loopy v: increment vertical scroll in v
+    if ((this.v & 0x7000) !== 0x7000) {
+      this.v += 0x1000;
+    } else {
+      this.v &= ~0x7000;
+      let y = (this.v & 0x03E0) >> 5; // coarse Y
+      if (y === 29) {
+        y = 0;
+        this.v ^= 0x0800; // switch vertical nametable
+      } else if (y === 31) {
+        y = 0;
+      } else {
+        y++;
+      }
+      this.v = (this.v & ~0x03E0) | (y << 5);
+    }
+  }
+  private copyX() {
+    // v: .....F.. ...EDCBA = t: .....F.. ...EDCBA
+    this.v = (this.v & ~0x041F) | (this.t & 0x041F);
+  }
+  private copyY() {
+    // v: .IHGF.ED CBA..... = t: .IHGF.ED CBA.....
+    this.v = (this.v & ~0x7BE0) | (this.t & 0x7BE0);
   }
 
   // --- Internal PPU memory ---

@@ -2,8 +2,15 @@ import type { Byte, Word } from '@core/cpu/types';
 import { PPU } from '@core/ppu/ppu';
 import { CPUBus } from '@core/bus/memory';
 
+import { Controller } from '@core/input/controller';
+
 export class NesIO {
+  private pad1 = new Controller();
+  private pad2 = new Controller();
+
   constructor(public ppu: PPU, private bus: CPUBus) {}
+
+  getController(index: 1|2) { return index === 1 ? this.pad1 : this.pad2; }
 
   read = (addr: Word): Byte => {
     switch (addr) {
@@ -12,9 +19,9 @@ export class NesIO {
       case 0x2007:
         return this.ppu.cpuRead(addr);
       case 0x4016:
+        return this.pad1.read();
       case 0x4017:
-        // Controller read (stub: return 0x40 with no buttons)
-        return 0x40;
+        return this.pad2.read();
       default:
         return 0x00;
     }
@@ -36,7 +43,8 @@ export class NesIO {
         break;
       }
       case 0x4016: {
-        // Controller strobe (stub)
+        this.pad1.write4016(value);
+        this.pad2.write4016(value);
         break;
       }
       default:

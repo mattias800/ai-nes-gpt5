@@ -1,0 +1,29 @@
+*# Node / TypeScript
+node_modules/
+dist/
+build/
+.tmp/
+.cache/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor
+.vscode/
+*.swp
+.DS_Store
+
+# Test artifacts
+coverage/
+.jest-cache/
+.vitest/
+
+# ROMs & large binaries (keep out of git; fetched via scripts)
+roms/
+*.nes
+*.bin
+*.rom
+*.nes

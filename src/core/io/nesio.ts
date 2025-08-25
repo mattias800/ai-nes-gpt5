@@ -7,8 +7,14 @@ import { Controller } from '@core/input/controller';
 export class NesIO {
   private pad1 = new Controller();
   private pad2 = new Controller();
+  private getCpuCycles: (() => number) | null = null;
+  private addCpuCycles: ((n: number) => void) | null = null;
 
   constructor(public ppu: PPU, private bus: CPUBus) {}
+
+  setCpuCycleHooks(getter: () => number, adder: (n: number) => void) {
+    this.getCpuCycles = getter; this.addCpuCycles = adder;
+  }
 
   getController(index: 1|2) { return index === 1 ? this.pad1 : this.pad2; }
 
@@ -40,6 +46,12 @@ export class NesIO {
         break;
       case 0x4014: { // OAM DMA
         this.ppu.oamDMA((a) => this.bus.read(a), value);
+        // CPU stalls for 513 or 514 cycles depending on current cycle parity
+        if (this.getCpuCycles && this.addCpuCycles) {
+          const cyc = this.getCpuCycles();
+          const stall = (cyc & 1) ? 514 : 513;
+          this.addCpuCycles(stall);
+        }
         break;
       }
       case 0x4016: {

@@ -26,6 +26,7 @@ export class CPU6502 {
 
   requestNMI() { this.nmiPending = true; }
   requestIRQ() { this.irqPending = true; }
+  addCycles(n: number) { this.state.cycles += n; }
 
   // Memory helpers
   private read(addr: Word): Byte { return this.bus.read(addr & 0xffff) & 0xff; }

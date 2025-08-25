@@ -19,10 +19,15 @@ export class NESSystem {
     this.ppu.connectCHR((a) => this.cart.readChr(a), (a, v) => this.cart.writeChr(a, v));
     const mapper: any = (this.cart as any).mapper;
     if (mapper.notifyA12Rise) this.ppu.setA12Hook(() => mapper.notifyA12Rise());
+    // Set mirroring from iNES flags
+    const flags6 = (this as any).cart ? (this as any).cart['rom'].flags6 : 0;
+    const four = (flags6 & 0x08) !== 0; const vert = (flags6 & 0x01) !== 0;
+    if (four) this.ppu.setMirroring('four'); else this.ppu.setMirroring(vert ? 'vertical' : 'horizontal');
     this.io = new NesIO(this.ppu, this.bus);
     this.bus.connectIO(this.io.read, this.io.write);
     this.bus.connectCart((a) => this.cart.readCpu(a), (a, v) => this.cart.writeCpu(a, v));
     this.cpu = new CPU6502(this.bus);
+    this.io.setCpuCycleHooks(() => this.cpu.state.cycles, (n) => this.cpu.addCycles(n));
   }
 
   reset() {

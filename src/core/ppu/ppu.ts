@@ -42,6 +42,8 @@ export class PPU {
 
   constructor(private mirror: MirrorMode = 'vertical') {}
 
+  setMirroring(mode: MirrorMode) { this.mirror = mode; }
+
   connectCHR(read: (addr: Word) => Byte, write: (addr: Word, value: Byte) => void) {
     this.chrRead = read; this.chrWrite = write;
   }

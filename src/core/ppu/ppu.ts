@@ -22,6 +22,10 @@ export class PPU {
   private palette = new Uint8Array(32);
   private oam = new Uint8Array(256);
 
+  // Cartridge CHR hooks
+  private chrRead: (addr: Word) => Byte = () => 0x00;
+  private chrWrite: (addr: Word, value: Byte) => void = () => {};
+
   // Read buffer for $2007
   private readBuffer = 0;
 
@@ -35,6 +39,10 @@ export class PPU {
   nmiOutput = false; // from ctrl bit7
 
   constructor(private mirror: MirrorMode = 'vertical') {}
+
+  connectCHR(read: (addr: Word) => Byte, write: (addr: Word, value: Byte) => void) {
+    this.chrRead = read; this.chrWrite = write;
+  }
 
   reset() {
     this.ctrl = 0; this.mask = 0; this.status = 0;
@@ -175,8 +183,8 @@ export class PPU {
   private ppuRead(addr14: Word): Byte {
     const a = addr14 & 0x3FFF;
     if (a < 0x2000) {
-      // Pattern tables (CHR) not modeled here; return 0
-      return 0x00;
+      // Delegate to cartridge CHR space
+      return this.chrRead(a);
     }
     if (a < 0x3F00) {
       const nt = this.mapNametable(a);
@@ -189,7 +197,8 @@ export class PPU {
     const a = addr14 & 0x3FFF;
     value &= 0xFF;
     if (a < 0x2000) {
-      // Pattern tables ignored (CHR RAM not modeled)
+      // Delegate to CHR RAM/ROM write
+      this.chrWrite(a, value);
       return;
     }
     if (a < 0x3F00) {

@@ -17,6 +17,8 @@ export class NESSystem {
     this.cart = new Cartridge(rom);
     this.ppu = new PPU();
     this.ppu.connectCHR((a) => this.cart.readChr(a), (a, v) => this.cart.writeChr(a, v));
+    const mapper: any = (this.cart as any).mapper;
+    if (mapper.notifyA12Rise) this.ppu.setA12Hook(() => mapper.notifyA12Rise());
     this.io = new NesIO(this.ppu, this.bus);
     this.bus.connectIO(this.io.read, this.io.write);
     this.bus.connectCart((a) => this.cart.readCpu(a), (a, v) => this.cart.writeCpu(a, v));

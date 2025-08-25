@@ -25,6 +25,8 @@ export class PPU {
   // Cartridge CHR hooks
   private chrRead: (addr: Word) => Byte = () => 0x00;
   private chrWrite: (addr: Word, value: Byte) => void = () => {};
+  private onA12Rise: (() => void) | null = null;
+  private lastA12 = 0; // previous state of A12 during CHR access
 
   // Read buffer for $2007
   private readBuffer = 0;
@@ -43,6 +45,8 @@ export class PPU {
   connectCHR(read: (addr: Word) => Byte, write: (addr: Word, value: Byte) => void) {
     this.chrRead = read; this.chrWrite = write;
   }
+
+  setA12Hook(hook: (() => void) | null) { this.onA12Rise = hook; }
 
   reset() {
     this.ctrl = 0; this.mask = 0; this.status = 0;
@@ -183,7 +187,12 @@ export class PPU {
   private ppuRead(addr14: Word): Byte {
     const a = addr14 & 0x3FFF;
     if (a < 0x2000) {
-      // Delegate to cartridge CHR space
+      // Delegate to cartridge CHR space with A12 rise detection
+      const a12 = (a >> 12) & 1;
+      if (this.lastA12 === 0 && a12 === 1) {
+        this.onA12Rise && this.onA12Rise();
+      }
+      this.lastA12 = a12;
       return this.chrRead(a);
     }
     if (a < 0x3F00) {
@@ -197,7 +206,12 @@ export class PPU {
     const a = addr14 & 0x3FFF;
     value &= 0xFF;
     if (a < 0x2000) {
-      // Delegate to CHR RAM/ROM write
+      // Delegate to CHR RAM/ROM write with A12 rise detection
+      const a12 = (a >> 12) & 1;
+      if (this.lastA12 === 0 && a12 === 1) {
+        this.onA12Rise && this.onA12Rise();
+      }
+      this.lastA12 = a12;
       this.chrWrite(a, value);
       return;
     }

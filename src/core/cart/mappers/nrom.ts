@@ -3,6 +3,7 @@ import type { Byte, Word } from "@core/cpu/types";
 export class NROM {
   private prg: Uint8Array;
   private prgMask: number;
+  private prgRam = new Uint8Array(0x2000); // 8KB PRG RAM at $6000-$7FFF
 
   constructor(prg: Uint8Array) {
     this.prg = prg;
@@ -15,10 +16,16 @@ export class NROM {
       const index = (addr - 0x8000) & this.prgMask;
       return this.prg[index];
     }
+    if (addr >= 0x6000 && addr < 0x8000) {
+      return this.prgRam[addr - 0x6000];
+    }
     return 0x00;
   }
 
-  write(_addr: Word, _value: Byte): void {
+  write(addr: Word, value: Byte): void {
+    if (addr >= 0x6000 && addr < 0x8000) {
+      this.prgRam[addr - 0x6000] = value & 0xFF;
+    }
     // NROM PRG is read-only
   }
 }

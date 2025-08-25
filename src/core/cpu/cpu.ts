@@ -220,22 +220,51 @@ export class CPU6502 {
       case 0x08: this.push8((s.p | U | B) & 0xff); s.cycles += 3; break; // PHP
       case 0x28: s.p = (this.pop8() & ~B) | U; s.cycles += 4; break; // PLP
       // AND/ORA/EOR
+      // AND
       case 0x29: { const { value } = this.adrIMM(); s.a = s.a & value!; this.setZN(s.a); s.cycles += 2; break; }
       case 0x25: { const { addr } = this.adrZP(); s.a = s.a & this.read(addr!); this.setZN(s.a); s.cycles += 3; break; }
+      case 0x35: { const { addr } = this.adrZPX(); s.a = s.a & this.read(addr!); this.setZN(s.a); s.cycles += 4; break; }
       case 0x2D: { const { addr } = this.adrABS(); s.a = s.a & this.read(addr!); this.setZN(s.a); s.cycles += 4; break; }
+      case 0x3D: { const { addr, crossed } = this.adrABSX(); s.a = s.a & this.read(addr!); this.setZN(s.a); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0x39: { const { addr, crossed } = this.adrABSY(); s.a = s.a & this.read(addr!); this.setZN(s.a); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0x21: { const { addr } = this.adrINDX(); s.a = s.a & this.read(addr!); this.setZN(s.a); s.cycles += 6; break; }
+      case 0x31: { const { addr, crossed } = this.adrINDY(); s.a = s.a & this.read(addr!); this.setZN(s.a); s.cycles += 5 + (crossed ? 1 : 0); break; }
+      // ORA
       case 0x09: { const { value } = this.adrIMM(); s.a = s.a | value!; this.setZN(s.a); s.cycles += 2; break; }
       case 0x05: { const { addr } = this.adrZP(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 3; break; }
+      case 0x15: { const { addr } = this.adrZPX(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 4; break; }
       case 0x0D: { const { addr } = this.adrABS(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 4; break; }
+      case 0x1D: { const { addr, crossed } = this.adrABSX(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0x19: { const { addr, crossed } = this.adrABSY(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0x01: { const { addr } = this.adrINDX(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 6; break; }
+      case 0x11: { const { addr, crossed } = this.adrINDY(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 5 + (crossed ? 1 : 0); break; }
+      // EOR
       case 0x49: { const { value } = this.adrIMM(); s.a = s.a ^ value!; this.setZN(s.a); s.cycles += 2; break; }
       case 0x45: { const { addr } = this.adrZP(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 3; break; }
+      case 0x55: { const { addr } = this.adrZPX(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 4; break; }
       case 0x4D: { const { addr } = this.adrABS(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 4; break; }
+      case 0x5D: { const { addr, crossed } = this.adrABSX(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0x59: { const { addr, crossed } = this.adrABSY(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0x41: { const { addr } = this.adrINDX(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 6; break; }
+      case 0x51: { const { addr, crossed } = this.adrINDY(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 5 + (crossed ? 1 : 0); break; }
       // ADC/SBC
       case 0x69: { const { value } = this.adrIMM(); this.adc(value!); s.cycles += 2; break; }
       case 0x65: { const { addr } = this.adrZP(); this.adc(this.read(addr!)); s.cycles += 3; break; }
+      case 0x75: { const { addr } = this.adrZPX(); this.adc(this.read(addr!)); s.cycles += 4; break; }
       case 0x6D: { const { addr } = this.adrABS(); this.adc(this.read(addr!)); s.cycles += 4; break; }
+      case 0x7D: { const { addr, crossed } = this.adrABSX(); this.adc(this.read(addr!)); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0x79: { const { addr, crossed } = this.adrABSY(); this.adc(this.read(addr!)); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0x61: { const { addr } = this.adrINDX(); this.adc(this.read(addr!)); s.cycles += 6; break; }
+      case 0x71: { const { addr, crossed } = this.adrINDY(); this.adc(this.read(addr!)); s.cycles += 5 + (crossed ? 1 : 0); break; }
       case 0xE9: case 0xEB: { const { value } = this.adrIMM(); this.sbc(value!); s.cycles += 2; break; }
       case 0xE5: { const { addr } = this.adrZP(); this.sbc(this.read(addr!)); s.cycles += 3; break; }
+      case 0xF5: { const { addr } = this.adrZPX(); this.sbc(this.read(addr!)); s.cycles += 4; break; }
       case 0xED: { const { addr } = this.adrABS(); this.sbc(this.read(addr!)); s.cycles += 4; break; }
+      case 0xFD: { const { addr, crossed } = this.adrABSX(); this.sbc(this.read(addr!)); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0xF9: { const { addr, crossed } = this.adrABSY(); this.sbc(this.read(addr!)); s.cycles += 4 + (crossed ? 1 : 0); break; }
+      case 0xE1: { const { addr } = this.adrINDX(); this.sbc(this.read(addr!)); s.cycles += 6; break; }
+      case 0xF1: { const { addr, crossed } = this.adrINDY(); this.sbc(this.read(addr!)); s.cycles += 5 + (crossed ? 1 : 0); break; }
+      
       // INC/DEC
       case 0xE6: { const { addr } = this.adrZP(); const v = (this.read(addr!) + 1) & 0xff; this.write(addr!, v); this.setZN(v); s.cycles += 5; break; }
       case 0xF6: { const { addr } = this.adrZPX(); const v = (this.read(addr!) + 1) & 0xff; this.write(addr!, v); this.setZN(v); s.cycles += 6; break; }
@@ -344,6 +373,14 @@ export class CPU6502 {
         s.cycles += 6;
         break;
       }
+      // Unofficial NOPs commonly used by test ROMs (treat as NOP with proper read timing)
+      case 0x1A: case 0x3A: case 0x5A: case 0x7A: case 0xDA: case 0xFA: // 1-byte NOP
+        s.cycles += 2; break;
+      case 0x80: { this.fetch8(); s.cycles += 2; break; } // NOP #imm (2-byte)
+      case 0x04: case 0x44: case 0x64: { this.adrZP(); s.cycles += 3; break; } // NOP zp
+      case 0x14: case 0x34: case 0x54: case 0x74: { this.adrZPX(); s.cycles += 4; break; } // NOP zp,X
+      case 0x0C: { this.adrABS(); s.cycles += 4; break; } // NOP abs
+      case 0x1C: case 0x3C: case 0x5C: case 0x7C: case 0xDC: case 0xFC: { const { crossed } = this.adrABSX(); s.cycles += 4 + (crossed ? 1 : 0); break; } // NOP abs,X
       default:
         throw new Error(`Opcode not implemented: $${opcode.toString(16)}`);
     }

@@ -38,17 +38,33 @@ export class NESSystem {
 
   // Step one instruction, servicing NMI/IRQ based on PPU and mapper state
   stepInstruction() {
-    // Deliver NMI from PPU
+    // Deliver NMI from PPU before CPU step if pending
     if (this.ppu.nmiOccurred && this.ppu.nmiOutput) {
       this.cpu.requestNMI();
       this.ppu.nmiOccurred = false; // edge-triggered
     }
-    // Deliver mapper IRQs (e.g., MMC3)
+    // Deliver mapper IRQs (e.g., MMC3) before CPU step
     const mapper: any = (this.cart as any).mapper;
     if (mapper.irqPending && mapper.irqPending()) {
       this.cpu.requestIRQ();
       mapper.clearIrq && mapper.clearIrq();
     }
+
+    const before = this.cpu.state.cycles;
     this.cpu.step();
+    const delta = this.cpu.state.cycles - before;
+    // Tick PPU at 3x CPU cycles
+    if (delta > 0) this.ppu.tick(delta * 3);
+
+    // Deliver NMI if VBlank started during PPU tick
+    if (this.ppu.nmiOccurred && this.ppu.nmiOutput) {
+      this.cpu.requestNMI();
+      this.ppu.nmiOccurred = false;
+    }
+    // Deliver mapper IRQs after PPU tick
+    if (mapper.irqPending && mapper.irqPending()) {
+      this.cpu.requestIRQ();
+      mapper.clearIrq && mapper.clearIrq();
+    }
   }
 }

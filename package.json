@@ -24,6 +24,7 @@
     "baseline:smb3": "node scripts/gen-smb3-baseline.mjs",
     "baseline:smb3:state": "node scripts/gen-smb3-state-baseline.mjs",
     "baseline:smb3:input": "node scripts/gen-smb3-input-baseline.mjs",
+    "baseline:smb3:input:extended": "node scripts/gen-smb3-input-extended-baseline.mjs",
     "accuracy:report": "node scripts/accuracy-report.mjs"
   },
   "devDependencies": {

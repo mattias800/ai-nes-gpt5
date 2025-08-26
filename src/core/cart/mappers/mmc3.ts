@@ -23,6 +23,11 @@ export class MMC3 implements Mapper {
   // Telemetry (opt-in via env MMC3_TRACE=1)
   private traceEnabled = false;
   private trace: Array<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean }> = [];
+  private addTrace(entry: { type: string, a?: number, v?: number, ctr?: number, en?: boolean }) {
+    if (!this.traceEnabled) return;
+    if (this.trace.length > 4096) this.trace.shift();
+    this.trace.push(entry);
+  }
 
   constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0)) {
     this.prg = prg;
@@ -49,32 +54,32 @@ export class MMC3 implements Mapper {
     }
     if (addr >= 0x8000 && addr <= 0x9FFE && (addr & 1) === 0) {
       this.bankSelect = value & 0x07 | ((value & 0x40) ? 0x40 : 0) | ((value & 0x80) ? 0x80 : 0);
-      if (this.traceEnabled) this.trace.push({ type: '8000', a: addr, v: value });
+      this.addTrace({ type: '8000', a: addr, v: value });
     } else if (addr >= 0x8001 && addr <= 0x9FFF && (addr & 1) === 1) {
       const reg = this.bankSelect & 0x07;
       this.bankRegs[reg] = value;
-      if (this.traceEnabled) this.trace.push({ type: '8001', a: reg, v: value });
+      this.addTrace({ type: '8001', a: reg, v: value });
     } else if (addr >= 0xA000 && addr <= 0xBFFE && (addr & 1) === 0) {
       this.mirroring = value & 1;
       if (this.mirrorCb) this.mirrorCb((this.mirroring & 1) ? 'horizontal' : 'vertical');
-      if (this.traceEnabled) this.trace.push({ type: 'A000', v: value & 1 });
+      this.addTrace({ type: 'A000', v: value & 1 });
     } else if (addr >= 0xA001 && addr <= 0xBFFF && (addr & 1) === 1) {
       this.ramProtect = value & 0xE3;
       this.prgRamEnable = !!(value & 0x80);
       this.prgRamWriteProtect = !!(value & 0x40);
-      if (this.traceEnabled) this.trace.push({ type: 'A001', v: value });
+      this.addTrace({ type: 'A001', v: value });
     } else if (addr >= 0xC000 && addr <= 0xDFFE && (addr & 1) === 0) {
       this.irqLatch = value;
-      if (this.traceEnabled) this.trace.push({ type: 'C000', v: value });
+      this.addTrace({ type: 'C000', v: value });
     } else if (addr >= 0xC001 && addr <= 0xDFFF && (addr & 1) === 1) {
       this.irqCounter = 0; // reload on next A12 rising edge
-      if (this.traceEnabled) this.trace.push({ type: 'C001' });
+      this.addTrace({ type: 'C001' });
     } else if (addr >= 0xE000 && addr <= 0xFFFE && (addr & 1) === 0) {
       this.irqEnabled = false; this.irq = false;
-      if (this.traceEnabled) this.trace.push({ type: 'E000' });
+      this.addTrace({ type: 'E000' });
     } else if (addr >= 0xE001 && addr <= 0xFFFF && (addr & 1) === 1) {
       this.irqEnabled = true;
-      if (this.traceEnabled) this.trace.push({ type: 'E001' });
+      this.addTrace({ type: 'E001' });
     }
   }
 
@@ -97,7 +102,7 @@ export class MMC3 implements Mapper {
       this.irqCounter = (this.irqCounter - 1) & 0xFF;
       if (this.irqCounter === 0 && this.irqEnabled) this.irq = true;
     }
-    if (this.traceEnabled) this.trace.push({ type: 'A12', ctr: this.irqCounter, en: this.irqEnabled });
+    this.addTrace({ type: 'A12', ctr: this.irqCounter, en: this.irqEnabled });
   }
 
   setMirrorCallback(cb: (mode: 'horizontal' | 'vertical') => void): void {
@@ -108,6 +113,24 @@ export class MMC3 implements Mapper {
 
   // Telemetry accessor (read-only)
   getTrace(): ReadonlyArray<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean }> { return this.trace; }
+
+  reset(): void {
+    // Reset all registers to initial state
+    this.bankSelect = 0;
+    this.bankRegs.fill(0);
+    this.mirroring = 0;
+    this.ramProtect = 0;
+    this.prgRamEnable = false;
+    this.prgRamWriteProtect = false;
+    this.irqLatch = 0;
+    this.irqCounter = 0;
+    this.irqEnabled = false;
+    this.irq = false;
+    this.trace.length = 0; // Clear trace
+    this.lastA12 = 0;
+    this.a12LastLowDot = 0;
+    this.dot = 0;
+  }
 
   private mapPrg(addr: Word): number {
     const mode = (this.bankSelect >> 6) & 1; // PRG mode bit

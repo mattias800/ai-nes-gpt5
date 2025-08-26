@@ -6,17 +6,19 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run --coverage",
+    "test:fast": "vitest run --config vitest.fast.config.ts",
+    "test:slow": "vitest run tests/slow/**/*.test.ts",
     "dev": "vite",
     "build:host": "vite build",
     "preview": "vite preview",
     "test:watch": "vitest",
     "test:long-run": "LONG_RUN=1 vitest run tests/harness/long_run_mario.test.ts",
     "test:long-run-deep": "LONG_RUN=1 vitest run tests/harness/long_run_mario_deep.test.ts",
-    "test:long-run-trace": "TRACE=1 TRACE_MAX=50000 LONG_RUN=1 vitest run --reporter=verbose tests/harness/long_run_mario_trace.test.ts",
+    "test:long-run-trace": "TRACE=1 TRACE_MAX=50000 LONG_RUN=1 vitest run --reporter=verbose tests/slow/harness/long_run_mario_trace.test.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "fetch:roms": "node scripts/fetch-roms.mjs",
-    "screenshot": "SCREENSHOT=1 vitest run tests/harness/screenshot.test.ts"
+    "screenshot": "SCREENSHOT=1 vitest run tests/slow/harness/screenshot.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",

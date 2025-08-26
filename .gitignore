@@ -21,6 +21,9 @@ coverage/
 .jest-cache/
 .vitest/
 
+# Local environment
+.env
+
 # ROMs & large binaries (keep out of git; fetched via scripts)
 roms/
 *.nes

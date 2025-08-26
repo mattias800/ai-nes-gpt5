@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ai-nes-gpt5 — Browser Host</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; background: #1e1e1e; color: #ddd; }
+      .row { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+      #screen { image-rendering: pixelated; background: #000; width: 512px; height: 480px; border: 1px solid #444; }
+      button, input[type=file] { font: inherit; }
+      .small { font-size: 12px; color: #aaa; }
+    </style>
+  </head>
+  <body>
+    <h1>ai-nes-gpt5 — Browser Host</h1>
+    <div class="row">
+      <input id="rom" type="file" accept=".nes" />
+      <button id="start" disabled>Start</button>
+      <button id="pause" disabled>Pause</button>
+      <span id="status" class="small">Load a .nes file</span>
+    </div>
+    <canvas id="screen" width="256" height="240"></canvas>
+
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>
+

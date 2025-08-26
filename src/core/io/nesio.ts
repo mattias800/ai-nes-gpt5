@@ -68,7 +68,16 @@ export class NesIO {
         if (this.apu) this.apu.write4017(value);
         break;
       }
+      case 0x4015: {
+        if (this.apu) this.apu.write4015(value);
+        break;
+      }
       default:
+        // Forward APU register range to APU if present
+        if (addr >= 0x4000 && addr <= 0x4013) {
+          if (this.apu && (this.apu as any).writeRegister) (this.apu as any).writeRegister(addr, value);
+          break;
+        }
         // Ignore other IO for now
         break;
     }

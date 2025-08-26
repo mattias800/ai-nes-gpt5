@@ -20,8 +20,8 @@ describe.skipIf(!enabled)('nestest', () => {
     const romBuf = new Uint8Array(fs.readFileSync(NES_PATH));
     const rom = parseINes(romBuf);
     const bus = new CPUBus();
-    const nrom = new NROM(rom.prg);
-    bus.connectCart((addr) => nrom.read(addr), (addr, v) => nrom.write(addr, v));
+    const nrom = new NROM(rom.prg, rom.chr);
+    bus.connectCart((addr) => nrom.cpuRead(addr), (addr, v) => nrom.cpuWrite(addr, v));
     bus.connectIO((_addr) => 0x00, (_addr, _v) => {});
 
     const cpu = new CPU6502(bus);
@@ -43,16 +43,18 @@ describe.skipIf(!enabled)('nestest', () => {
       if (cpu.state.pc !== expectPC) {
         throw new Error(`PC mismatch before step: got ${cpu.state.pc.toString(16)}, expected ${expectPC.toString(16)}`);
       }
+      // Compare CPU state BEFORE executing this instruction; nestest.log reports pre-step state
+      const maskB = 0xEF; // ignore B flag differences
+      if (cpu.state.a !== expectA || cpu.state.x !== expectX || cpu.state.y !== expectY || (cpu.state.p & maskB) !== (expectP & maskB) || cpu.state.s !== expectS) {
+        throw new Error(`State mismatch before step at PC=${expectPC.toString(16)}\n`+
+          `A=${hex(cpu.state.a)} X=${hex(cpu.state.x)} Y=${hex(cpu.state.y)} P=${hex(cpu.state.p)} S=${hex(cpu.state.s)}\n`+
+          `expected A=${hex(expectA)} X=${hex(expectX)} Y=${hex(expectY)} P=${hex(expectP)} S=${hex(expectS)}`);
+      }
       try {
         cpu.step();
       } catch (e) {
         // If an opcode is not implemented yet, make the failure clear
         throw e;
-      }
-      if (cpu.state.a !== expectA || cpu.state.x !== expectX || cpu.state.y !== expectY || (cpu.state.p & 0xEF) !== (expectP & 0xEF) || cpu.state.s !== expectS) {
-        throw new Error(`State mismatch after step at PC=${expectPC.toString(16)}\n`+
-          `A=${hex(cpu.state.a)} X=${hex(cpu.state.x)} Y=${hex(cpu.state.y)} P=${hex(cpu.state.p)} S=${hex(cpu.state.s)}\n`+
-          `expected A=${hex(expectA)} X=${hex(expectX)} Y=${hex(expectY)} P=${hex(expectP)} S=${hex(expectS)}`);
       }
     }
   });

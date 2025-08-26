@@ -15,9 +15,17 @@ export class CPU6502 {
   state: CPUState;
   private nmiPending = false;
   private irqPending = false;
+  // simple trace ring for debugging
+  private tracePC: number[] = new Array(64).fill(0);
+  private traceIdx = 0;
+  // optional external per-instruction trace hook
+  private traceHook: ((pc: number, opcode: number) => void) | null = null;
   constructor(private bus: CPUBus) {
     this.state = { a: 0, x: 0, y: 0, s: 0xfd, pc: 0, p: 0x24, cycles: 0 };
   }
+
+  // Enable/disable a per-instruction trace callback (for harness debugging)
+  setTraceHook(fn: ((pc: number, opcode: number) => void) | null) { this.traceHook = fn; }
 
   reset(vector: Word) {
     this.state = { a: 0, x: 0, y: 0, s: 0xfd, pc: vector & 0xffff, p: 0x24, cycles: 0 };
@@ -83,6 +91,34 @@ export class CPU6502 {
   private getFlag(mask: number): boolean { return (this.state.p & mask) !== 0; }
   private setFlag(mask: number, val: boolean) {
     this.state.p = (this.state.p & ~mask) | (val ? mask : 0);
+  }
+
+  // --- Helpers for RMW illegal opcodes ---
+  private aslByte(v: Byte): Byte {
+    const c = (v & 0x80) !== 0;
+    const r = (v << 1) & 0xff;
+    this.setFlag(C, c);
+    return r;
+  }
+  private lsrByte(v: Byte): Byte {
+    const c = (v & 0x01) !== 0;
+    const r = (v >>> 1) & 0xff;
+    this.setFlag(C, c);
+    return r;
+  }
+  private rolByte(v: Byte): Byte {
+    const oldC = this.getFlag(C);
+    const newC = (v & 0x80) !== 0;
+    const r = ((v << 1) | (oldC ? 1 : 0)) & 0xff;
+    this.setFlag(C, newC);
+    return r;
+  }
+  private rorByte(v: Byte): Byte {
+    const oldC = this.getFlag(C);
+    const newC = (v & 0x01) !== 0;
+    const r = ((v >>> 1) | (oldC ? 0x80 : 0)) & 0xff;
+    this.setFlag(C, newC);
+    return r;
   }
 
   // Addressing modes return {addr?, value?, crossed?}
@@ -165,7 +201,13 @@ export class CPU6502 {
     // Service interrupts between instructions
     if (this.serviceInterrupts()) return;
 
+    const pcBefore = this.state.pc;
+    // record every step
+    this.tracePC[this.traceIdx & 63] = pcBefore;
+    this.traceIdx++;
     const opcode = this.fetch8();
+    // optional external tracing
+    if (this.traceHook) { try { this.traceHook(pcBefore, opcode); } catch {} }
     // Base cycles table for implemented opcodes
     const s = this.state;
     switch (opcode) {
@@ -200,6 +242,11 @@ export class CPU6502 {
       case 0x99: { const { addr } = this.adrABSY(); this.write(addr!, s.a); s.cycles += 5; break; }
       case 0x81: { const { addr } = this.adrINDX(); this.write(addr!, s.a); s.cycles += 6; break; }
       case 0x91: { const { addr } = this.adrINDY(); this.write(addr!, s.a); s.cycles += 6; break; }
+      // Unofficial: SAX (store A & X)
+      case 0x87: { const { addr } = this.adrZP(); this.write(addr!, s.a & s.x); s.cycles += 3; break; }      // SAX zp
+      case 0x97: { const { addr } = this.adrZPY(); this.write(addr!, s.a & s.x); s.cycles += 4; break; }     // SAX zp,Y
+      case 0x8F: { const { addr } = this.adrABS(); this.write(addr!, s.a & s.x); s.cycles += 4; break; }      // SAX abs
+      case 0x83: { const { addr } = this.adrINDX(); this.write(addr!, s.a & s.x); s.cycles += 6; break; }     // SAX (zp,X)
       // STX
       case 0x86: { const { addr } = this.adrZP(); this.write(addr!, s.x); s.cycles += 3; break; }
       case 0x96: { const { addr } = this.adrZPY(); this.write(addr!, s.x); s.cycles += 4; break; }
@@ -239,6 +286,15 @@ export class CPU6502 {
       case 0x19: { const { addr, crossed } = this.adrABSY(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 4 + (crossed ? 1 : 0); break; }
       case 0x01: { const { addr } = this.adrINDX(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 6; break; }
       case 0x11: { const { addr, crossed } = this.adrINDY(); s.a = s.a | this.read(addr!); this.setZN(s.a); s.cycles += 5 + (crossed ? 1 : 0); break; }
+      
+      // Unofficial: LAX (load A and X) - behaves like LDA then TAX
+      case 0xA7: { const { addr } = this.adrZP(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 3; break; }      // LAX zp
+      case 0xB7: { const { addr } = this.adrZPY(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 4; break; }     // LAX zp,Y
+      case 0xAF: { const { addr } = this.adrABS(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 4; break; }      // LAX abs
+      case 0xBF: { const { addr, crossed } = this.adrABSY(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 4 + (crossed ? 1 : 0); break; } // LAX abs,Y
+      case 0xA3: { const { addr } = this.adrINDX(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 6; break; }    // LAX (zp,X)
+      case 0xB3: { const { addr, crossed } = this.adrINDY(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 5 + (crossed ? 1 : 0); break; } // LAX (zp),Y
+      case 0xAB: { const { value } = this.adrIMM(); const v = value!; s.a = v; s.x = v; this.setZN(v); s.cycles += 2; break; }             // LAX #imm (unstable, but enough for tests)
       // EOR
       case 0x49: { const { value } = this.adrIMM(); s.a = s.a ^ value!; this.setZN(s.a); s.cycles += 2; break; }
       case 0x45: { const { addr } = this.adrZP(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 3; break; }
@@ -301,6 +357,56 @@ export class CPU6502 {
       case 0x76: { const { addr } = this.adrZPX(); let v = this.read(addr!); const oldC = this.getFlag(C); const newC = (v & 0x01) !== 0; v = ((v >>> 1) | (oldC ? 0x80 : 0)) & 0xff; this.write(addr!, v); this.setFlag(C, newC); this.setZN(v); s.cycles += 6; break; } // ROR zp,X
       case 0x6E: { const { addr } = this.adrABS(); let v = this.read(addr!); const oldC = this.getFlag(C); const newC = (v & 0x01) !== 0; v = ((v >>> 1) | (oldC ? 0x80 : 0)) & 0xff; this.write(addr!, v); this.setFlag(C, newC); this.setZN(v); s.cycles += 6; break; } // ROR abs
       case 0x7E: { const { addr } = this.adrABSX(); let v = this.read(addr!); const oldC = this.getFlag(C); const newC = (v & 0x01) !== 0; v = ((v >>> 1) | (oldC ? 0x80 : 0)) & 0xff; this.write(addr!, v); this.setFlag(C, newC); this.setZN(v); s.cycles += 7; break; } // ROR abs,X
+
+      // --- Unofficial RMW + ALU combos ---
+      // SLO: (ASL mem) then ORA A
+      case 0x03: { const { addr } = this.adrINDX(); let v = this.read(addr!); v = this.aslByte(v); this.write(addr!, v); s.a = (s.a | v) & 0xff; this.setZN(s.a); s.cycles += 8; break; }
+      case 0x07: { const { addr } = this.adrZP();    let v = this.read(addr!); v = this.aslByte(v); this.write(addr!, v); s.a = (s.a | v) & 0xff; this.setZN(s.a); s.cycles += 5; break; }
+      case 0x0F: { const { addr } = this.adrABS();   let v = this.read(addr!); v = this.aslByte(v); this.write(addr!, v); s.a = (s.a | v) & 0xff; this.setZN(s.a); s.cycles += 6; break; }
+      case 0x13: { const { addr } = this.adrINDY(); let v = this.read(addr!); v = this.aslByte(v); this.write(addr!, v); s.a = (s.a | v) & 0xff; this.setZN(s.a); s.cycles += 8; break; }
+      case 0x17: { const { addr } = this.adrZPX();   let v = this.read(addr!); v = this.aslByte(v); this.write(addr!, v); s.a = (s.a | v) & 0xff; this.setZN(s.a); s.cycles += 6; break; }
+      case 0x1B: { const { addr } = this.adrABSY();  let v = this.read(addr!); v = this.aslByte(v); this.write(addr!, v); s.a = (s.a | v) & 0xff; this.setZN(s.a); s.cycles += 7; break; }
+      case 0x1F: { const { addr } = this.adrABSX();  let v = this.read(addr!); v = this.aslByte(v); this.write(addr!, v); s.a = (s.a | v) & 0xff; this.setZN(s.a); s.cycles += 7; break; }
+      // RLA: (ROL mem) then AND A
+      case 0x23: { const { addr } = this.adrINDX(); let v = this.read(addr!); v = this.rolByte(v); this.write(addr!, v); s.a = (s.a & v) & 0xff; this.setZN(s.a); s.cycles += 8; break; }
+      case 0x27: { const { addr } = this.adrZP();    let v = this.read(addr!); v = this.rolByte(v); this.write(addr!, v); s.a = (s.a & v) & 0xff; this.setZN(s.a); s.cycles += 5; break; }
+      case 0x2F: { const { addr } = this.adrABS();   let v = this.read(addr!); v = this.rolByte(v); this.write(addr!, v); s.a = (s.a & v) & 0xff; this.setZN(s.a); s.cycles += 6; break; }
+      case 0x33: { const { addr } = this.adrINDY(); let v = this.read(addr!); v = this.rolByte(v); this.write(addr!, v); s.a = (s.a & v) & 0xff; this.setZN(s.a); s.cycles += 8; break; }
+      case 0x37: { const { addr } = this.adrZPX();   let v = this.read(addr!); v = this.rolByte(v); this.write(addr!, v); s.a = (s.a & v) & 0xff; this.setZN(s.a); s.cycles += 6; break; }
+      case 0x3B: { const { addr } = this.adrABSY();  let v = this.read(addr!); v = this.rolByte(v); this.write(addr!, v); s.a = (s.a & v) & 0xff; this.setZN(s.a); s.cycles += 7; break; }
+      case 0x3F: { const { addr } = this.adrABSX();  let v = this.read(addr!); v = this.rolByte(v); this.write(addr!, v); s.a = (s.a & v) & 0xff; this.setZN(s.a); s.cycles += 7; break; }
+      // SRE: (LSR mem) then EOR A
+      case 0x43: { const { addr } = this.adrINDX(); let v = this.read(addr!); v = this.lsrByte(v); this.write(addr!, v); s.a = (s.a ^ v) & 0xff; this.setZN(s.a); s.cycles += 8; break; }
+      case 0x47: { const { addr } = this.adrZP();    let v = this.read(addr!); v = this.lsrByte(v); this.write(addr!, v); s.a = (s.a ^ v) & 0xff; this.setZN(s.a); s.cycles += 5; break; }
+      case 0x4F: { const { addr } = this.adrABS();   let v = this.read(addr!); v = this.lsrByte(v); this.write(addr!, v); s.a = (s.a ^ v) & 0xff; this.setZN(s.a); s.cycles += 6; break; }
+      case 0x53: { const { addr } = this.adrINDY(); let v = this.read(addr!); v = this.lsrByte(v); this.write(addr!, v); s.a = (s.a ^ v) & 0xff; this.setZN(s.a); s.cycles += 8; break; }
+      case 0x57: { const { addr } = this.adrZPX();   let v = this.read(addr!); v = this.lsrByte(v); this.write(addr!, v); s.a = (s.a ^ v) & 0xff; this.setZN(s.a); s.cycles += 6; break; }
+      case 0x5B: { const { addr } = this.adrABSY();  let v = this.read(addr!); v = this.lsrByte(v); this.write(addr!, v); s.a = (s.a ^ v) & 0xff; this.setZN(s.a); s.cycles += 7; break; }
+      case 0x5F: { const { addr } = this.adrABSX();  let v = this.read(addr!); v = this.lsrByte(v); this.write(addr!, v); s.a = (s.a ^ v) & 0xff; this.setZN(s.a); s.cycles += 7; break; }
+      // RRA: (ROR mem) then ADC
+      case 0x63: { const { addr } = this.adrINDX(); let v = this.read(addr!); v = this.rorByte(v); this.write(addr!, v); this.adc(v); s.cycles += 8; break; }
+      case 0x67: { const { addr } = this.adrZP();    let v = this.read(addr!); v = this.rorByte(v); this.write(addr!, v); this.adc(v); s.cycles += 5; break; }
+      case 0x6F: { const { addr } = this.adrABS();   let v = this.read(addr!); v = this.rorByte(v); this.write(addr!, v); this.adc(v); s.cycles += 6; break; }
+      case 0x73: { const { addr } = this.adrINDY(); let v = this.read(addr!); v = this.rorByte(v); this.write(addr!, v); this.adc(v); s.cycles += 8; break; }
+      case 0x77: { const { addr } = this.adrZPX();   let v = this.read(addr!); v = this.rorByte(v); this.write(addr!, v); this.adc(v); s.cycles += 6; break; }
+      case 0x7B: { const { addr } = this.adrABSY();  let v = this.read(addr!); v = this.rorByte(v); this.write(addr!, v); this.adc(v); s.cycles += 7; break; }
+      case 0x7F: { const { addr } = this.adrABSX();  let v = this.read(addr!); v = this.rorByte(v); this.write(addr!, v); this.adc(v); s.cycles += 7; break; }
+      // DCP: (DEC mem) then CMP
+      case 0xC3: { const { addr } = this.adrINDX(); let v = (this.read(addr!) - 1) & 0xff; this.write(addr!, v); this.cmp(s.a, v); s.cycles += 8; break; }
+      case 0xC7: { const { addr } = this.adrZP();    let v = (this.read(addr!) - 1) & 0xff; this.write(addr!, v); this.cmp(s.a, v); s.cycles += 5; break; }
+      case 0xCF: { const { addr } = this.adrABS();   let v = (this.read(addr!) - 1) & 0xff; this.write(addr!, v); this.cmp(s.a, v); s.cycles += 6; break; }
+      case 0xD3: { const { addr } = this.adrINDY(); let v = (this.read(addr!) - 1) & 0xff; this.write(addr!, v); this.cmp(s.a, v); s.cycles += 8; break; }
+      case 0xD7: { const { addr } = this.adrZPX();   let v = (this.read(addr!) - 1) & 0xff; this.write(addr!, v); this.cmp(s.a, v); s.cycles += 6; break; }
+      case 0xDB: { const { addr } = this.adrABSY();  let v = (this.read(addr!) - 1) & 0xff; this.write(addr!, v); this.cmp(s.a, v); s.cycles += 7; break; }
+      case 0xDF: { const { addr } = this.adrABSX();  let v = (this.read(addr!) - 1) & 0xff; this.write(addr!, v); this.cmp(s.a, v); s.cycles += 7; break; }
+      // ISB/ISC: (INC mem) then SBC
+      case 0xE3: { const { addr } = this.adrINDX(); let v = (this.read(addr!) + 1) & 0xff; this.write(addr!, v); this.sbc(v); s.cycles += 8; break; }
+      case 0xE7: { const { addr } = this.adrZP();    let v = (this.read(addr!) + 1) & 0xff; this.write(addr!, v); this.sbc(v); s.cycles += 5; break; }
+      case 0xEF: { const { addr } = this.adrABS();   let v = (this.read(addr!) + 1) & 0xff; this.write(addr!, v); this.sbc(v); s.cycles += 6; break; }
+      case 0xF3: { const { addr } = this.adrINDY(); let v = (this.read(addr!) + 1) & 0xff; this.write(addr!, v); this.sbc(v); s.cycles += 8; break; }
+      case 0xF7: { const { addr } = this.adrZPX();   let v = (this.read(addr!) + 1) & 0xff; this.write(addr!, v); this.sbc(v); s.cycles += 6; break; }
+      case 0xFB: { const { addr } = this.adrABSY();  let v = (this.read(addr!) + 1) & 0xff; this.write(addr!, v); this.sbc(v); s.cycles += 7; break; }
+      case 0xFF: { const { addr } = this.adrABSX();  let v = (this.read(addr!) + 1) & 0xff; this.write(addr!, v); this.sbc(v); s.cycles += 7; break; }
       // BIT
       case 0x24: { const { addr } = this.adrZP(); const v = this.read(addr!); this.setFlag(Z, (s.a & v) === 0); this.setFlag(V, (v & 0x40) !== 0); this.setFlag(N, (v & 0x80) !== 0); s.cycles += 3; break; }
       case 0x2C: { const { addr } = this.adrABS(); const v = this.read(addr!); this.setFlag(Z, (s.a & v) === 0); this.setFlag(V, (v & 0x40) !== 0); this.setFlag(N, (v & 0x80) !== 0); s.cycles += 4; break; }
@@ -379,11 +485,40 @@ export class CPU6502 {
         s.cycles += 2; break;
       case 0x80: { this.fetch8(); s.cycles += 2; break; } // NOP #imm (2-byte)
       case 0x04: case 0x44: case 0x64: { this.adrZP(); s.cycles += 3; break; } // NOP zp
-      case 0x14: case 0x34: case 0x54: case 0x74: { this.adrZPX(); s.cycles += 4; break; } // NOP zp,X
+      case 0x14: case 0x34: case 0x54: case 0x74: case 0xD4: case 0xF4: { this.adrZPX(); s.cycles += 4; break; } // NOP zp,X
       case 0x0C: { this.adrABS(); s.cycles += 4; break; } // NOP abs
       case 0x1C: case 0x3C: case 0x5C: case 0x7C: case 0xDC: case 0xFC: { const { crossed } = this.adrABSX(); s.cycles += 4 + (crossed ? 1 : 0); break; } // NOP abs,X
-      default:
-        throw new Error(`Opcode not implemented: $${opcode.toString(16)}`);
+      default: {
+        const s0 = this.state;
+        // record trace ring before throwing
+        this.tracePC[this.traceIdx & 63] = pcBefore;
+        this.traceIdx++;
+        const opPc = (s0.pc - 1) & 0xffff;
+        const dump = (start: number, len: number) => {
+          const bytes: string[] = [];
+          for (let i = 0; i < len; i++) {
+            const b = this.read((start + i) & 0xffff);
+            bytes.push(b.toString(16).padStart(2, '0'));
+          }
+          return bytes.join(' ');
+        };
+        const before = (opPc - 8) & 0xffff;
+        const around = dump(before, 17);
+        const regs = `A=${s0.a.toString(16).padStart(2,'0')} X=${s0.x.toString(16).padStart(2,'0')} Y=${s0.y.toString(16).padStart(2,'0')} S=${s0.s.toString(16).padStart(2,'0')} P=${s0.p.toString(16).padStart(2,'0')} CYC=${s0.cycles}`;
+        // build recent PC trace
+        const pcs: string[] = [];
+        const count = Math.min(16, this.traceIdx);
+        for (let i = count - 1; i >= 0; i--) {
+          const idx = (this.traceIdx - 1 - i) & 63;
+          pcs.push(`$${this.tracePC[idx].toString(16).padStart(4,'0')}`);
+        }
+        // dump a portion of stack page around S
+        const sBase = 0x0100;
+        const sStart = (sBase + ((s0.s + 1) & 0xff)) & 0xffff; // next pull location
+        const sDump = dump(sBase, 32);
+        const msg = `Opcode not implemented: $${opcode.toString(16)} at $${opPc.toString(16).padStart(4,'0')}\nRegs: ${regs}\nMem[$${((opPc-8)&0xffff).toString(16).padStart(4,'0')}..]: ${around}\nTracePC: ${pcs.join(' ')}\nStack[S=${s0.s.toString(16)} next=$${sStart.toString(16)}]: ${sDump}`;
+        throw new Error(msg);
+      }
     }
   }
 }

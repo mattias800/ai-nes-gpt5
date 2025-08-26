@@ -35,6 +35,8 @@ export class NESSystem {
     this.apu = new APU();
     this.apu.reset();
     this.io.attachAPU(this.apu);
+    // Provide APU with CPU memory read for DMC fetches
+    this.apu.setCpuRead((addr) => this.bus.read(addr & 0xFFFF));
   }
 
   reset() {
@@ -56,6 +58,7 @@ export class NESSystem {
       this.cpu.requestIRQ();
       mapper.clearIrq && mapper.clearIrq();
     }
+    // (APU IRQs are delivered after the CPU step once APU has been ticked)
 
     const before = this.cpu.state.cycles;
     this.cpu.step();
@@ -75,6 +78,13 @@ export class NESSystem {
     if (mapper.irqPending && mapper.irqPending()) {
       this.cpu.requestIRQ();
       mapper.clearIrq && mapper.clearIrq();
+    }
+    // Deliver APU IRQs after APU tick
+    if (this.apu && this.apu.dmcIrqPending && this.apu.dmcIrqPending()) {
+      this.cpu.requestIRQ();
+    }
+    if (this.apu && (this.apu as any).frameIrqPending && (this.apu as any).frameIrqPending()) {
+      this.cpu.requestIRQ();
     }
   }
 }

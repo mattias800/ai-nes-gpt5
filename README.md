@@ -22,6 +22,7 @@ Overview
 - Language/runtime: TypeScript, Node.js
 - Scope: CPU (6502 without decimal), PPU (RP2C02), APU (frame counter, pulse/triangle/noise/DMC), mappers (NROM, UxROM, CNROM, MMC1, MMC3)
 - Headless by design: core is UI-agnostic; tests and harnesses drive video/audio deterministically
+- Development modality: AI-driven, automated file edits and scripted verification (local-only); changes land via reproducible diffs and tests.
 
 Design goals
 - Correctness over everything (see PLAN.md and PLANS/*)

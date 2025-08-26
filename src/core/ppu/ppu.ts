@@ -55,7 +55,14 @@ export class PPU {
   // Sampling mode: legacy (scroll-shadow) vs vt (loopy v/t timing). Default legacy for compatibility.
   private useVT = false;
 
-  constructor(private mirror: MirrorMode = 'vertical') {}
+  constructor(private mirror: MirrorMode = 'vertical') {
+    try {
+      // Allow default timing mode via env for tests
+      // eslint-disable-next-line no-undef
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.PPU_TIMING_DEFAULT === 'vt') this.useVT = true;
+    } catch {}
+  }
 
   setMirroring(mode: MirrorMode) { this.mirror = mode; }
 

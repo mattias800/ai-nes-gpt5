@@ -6,24 +6,35 @@ export class MMC3 implements Mapper {
   private prg: Uint8Array;
   private chr: Uint8Array;
   private prgRam = new Uint8Array(0x2000);
+  private prgRamEnable = false;
+  private prgRamWriteProtect = false;
 
   private bankSelect = 0;
   private bankRegs = new Uint8Array(8); // R0..R7
   private mirroring = 0; // 0: vertical, 1: horizontal (A000)
   private ramProtect = 0; // A001
+  private mirrorCb: ((mode: 'horizontal'|'vertical') => void) | null = null;
 
   private irqLatch = 0;
   private irqCounter = 0;
   private irqEnabled = false;
   private irq = false;
 
+  // Telemetry (opt-in via env MMC3_TRACE=1)
+  private traceEnabled = false;
+  private trace: Array<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean }> = [];
+
   constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0)) {
     this.prg = prg;
     this.chr = chr.length ? chr : new Uint8Array(0x2000);
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.MMC3_TRACE === '1') this.traceEnabled = true;
+    } catch {}
   }
 
   cpuRead(addr: Word): Byte {
-    if (addr >= 0x6000 && addr < 0x8000) return this.prgRam[addr - 0x6000];
+    if (addr >= 0x6000 && addr < 0x8000) return this.prgRamEnable ? this.prgRam[addr - 0x6000] : 0x00;
     if (addr >= 0x8000) {
       const banked = this.mapPrg(addr);
       return this.prg[banked];
@@ -32,24 +43,38 @@ export class MMC3 implements Mapper {
   }
 
   cpuWrite(addr: Word, value: Byte): void {
-    if (addr >= 0x6000 && addr < 0x8000) { this.prgRam[addr - 0x6000] = value & 0xFF; return; }
+    if (addr >= 0x6000 && addr < 0x8000) {
+      if (this.prgRamEnable && !this.prgRamWriteProtect) this.prgRam[addr - 0x6000] = value & 0xFF;
+      return;
+    }
     if (addr >= 0x8000 && addr <= 0x9FFE && (addr & 1) === 0) {
       this.bankSelect = value & 0x07 | ((value & 0x40) ? 0x40 : 0) | ((value & 0x80) ? 0x80 : 0);
+      if (this.traceEnabled) this.trace.push({ type: '8000', a: addr, v: value });
     } else if (addr >= 0x8001 && addr <= 0x9FFF && (addr & 1) === 1) {
       const reg = this.bankSelect & 0x07;
       this.bankRegs[reg] = value;
+      if (this.traceEnabled) this.trace.push({ type: '8001', a: reg, v: value });
     } else if (addr >= 0xA000 && addr <= 0xBFFE && (addr & 1) === 0) {
       this.mirroring = value & 1;
+      if (this.mirrorCb) this.mirrorCb((this.mirroring & 1) ? 'horizontal' : 'vertical');
+      if (this.traceEnabled) this.trace.push({ type: 'A000', v: value & 1 });
     } else if (addr >= 0xA001 && addr <= 0xBFFF && (addr & 1) === 1) {
-      this.ramProtect = value & 0xE3; // not fully used here
+      this.ramProtect = value & 0xE3;
+      this.prgRamEnable = !!(value & 0x80);
+      this.prgRamWriteProtect = !!(value & 0x40);
+      if (this.traceEnabled) this.trace.push({ type: 'A001', v: value });
     } else if (addr >= 0xC000 && addr <= 0xDFFE && (addr & 1) === 0) {
       this.irqLatch = value;
+      if (this.traceEnabled) this.trace.push({ type: 'C000', v: value });
     } else if (addr >= 0xC001 && addr <= 0xDFFF && (addr & 1) === 1) {
       this.irqCounter = 0; // reload on next A12 rising edge
+      if (this.traceEnabled) this.trace.push({ type: 'C001' });
     } else if (addr >= 0xE000 && addr <= 0xFFFE && (addr & 1) === 0) {
       this.irqEnabled = false; this.irq = false;
+      if (this.traceEnabled) this.trace.push({ type: 'E000' });
     } else if (addr >= 0xE001 && addr <= 0xFFFF && (addr & 1) === 1) {
       this.irqEnabled = true;
+      if (this.traceEnabled) this.trace.push({ type: 'E001' });
     }
   }
 
@@ -65,13 +90,24 @@ export class MMC3 implements Mapper {
 
   notifyA12Rise(): void {
     // On A12 rising edge: if counter is 0, reload from latch, else decrement. When becomes 0 and enabled, set IRQ.
+    const before = this.irqCounter;
     if (this.irqCounter === 0) {
       this.irqCounter = this.irqLatch;
     } else {
       this.irqCounter = (this.irqCounter - 1) & 0xFF;
       if (this.irqCounter === 0 && this.irqEnabled) this.irq = true;
     }
+    if (this.traceEnabled) this.trace.push({ type: 'A12', ctr: this.irqCounter, en: this.irqEnabled });
   }
+
+  setMirrorCallback(cb: (mode: 'horizontal' | 'vertical') => void): void {
+    this.mirrorCb = cb;
+    // Apply current state immediately
+    cb((this.mirroring & 1) ? 'horizontal' : 'vertical');
+  }
+
+  // Telemetry accessor (read-only)
+  getTrace(): ReadonlyArray<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean }> { return this.trace; }
 
   private mapPrg(addr: Word): number {
     const mode = (this.bankSelect >> 6) & 1; // PRG mode bit
@@ -104,22 +140,27 @@ export class MMC3 implements Mapper {
     const r4 = this.bankRegs[4] & 0xFF;
     const r5 = this.bankRegs[5] & 0xFF;
 
+    const map = (bank1k: number, off: number) => {
+      const index = (bank1k * 0x400 + off) % this.chr.length;
+      return index < 0 ? index + this.chr.length : index;
+    };
+
     if (mode === 0) {
       // $0000-$07FF: 2KB at R0; $0800-$0FFF: 2KB at R1; $1000-$13FF:1KB R2; ... $1C00-$1FFF:1KB R5
-      if (addr < 0x0800) return (r0 * 0x400) + addr;
-      if (addr < 0x1000) return (r1 * 0x400) + (addr - 0x0800);
-      if (addr < 0x1400) return (r2 * 0x400) + (addr - 0x1000);
-      if (addr < 0x1800) return (r3 * 0x400) + (addr - 0x1400);
-      if (addr < 0x1C00) return (r4 * 0x400) + (addr - 0x1800);
-      return (r5 * 0x400) + (addr - 0x1C00);
+      if (addr < 0x0800) return map(r0, addr);
+      if (addr < 0x1000) return map(r1, addr - 0x0800);
+      if (addr < 0x1400) return map(r2, addr - 0x1000);
+      if (addr < 0x1800) return map(r3, addr - 0x1400);
+      if (addr < 0x1C00) return map(r4, addr - 0x1800);
+      return map(r5, addr - 0x1C00);
     } else {
       // Invert mapping halves
-      if (addr < 0x0800) return (r2 * 0x400) + addr;
-      if (addr < 0x1000) return (r3 * 0x400) + (addr - 0x0800);
-      if (addr < 0x1400) return (r4 * 0x400) + (addr - 0x1000);
-      if (addr < 0x1800) return (r5 * 0x400) + (addr - 0x1400);
-      if (addr < 0x1C00) return (r0 * 0x400) + (addr - 0x1800);
-      return (r1 * 0x400) + (addr - 0x1C00);
+      if (addr < 0x0800) return map(r2, addr);
+      if (addr < 0x1000) return map(r3, addr - 0x0800);
+      if (addr < 0x1400) return map(r4, addr - 0x1000);
+      if (addr < 0x1800) return map(r5, addr - 0x1400);
+      if (addr < 0x1C00) return map(r0, addr - 0x1800);
+      return map(r1, addr - 0x1C00);
     }
   }
 }

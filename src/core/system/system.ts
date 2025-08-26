@@ -25,6 +25,8 @@ export class NESSystem {
     const flags6 = (this as any).cart ? (this as any).cart['rom'].flags6 : 0;
     const four = (flags6 & 0x08) !== 0; const vert = (flags6 & 0x01) !== 0;
     if (four) this.ppu.setMirroring('four'); else this.ppu.setMirroring(vert ? 'vertical' : 'horizontal');
+    // Allow mapper (e.g., MMC3) to control nametable mirroring dynamically via A000 writes
+    if (mapper.setMirrorCallback) mapper.setMirrorCallback((mode: 'horizontal' | 'vertical') => this.ppu.setMirroring(mode));
     this.io = new NesIO(this.ppu, this.bus);
     this.bus.connectIO(this.io.read, this.io.write);
     this.bus.connectCart((a) => this.cart.readCpu(a), (a, v) => this.cart.writeCpu(a, v));

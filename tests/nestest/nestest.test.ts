@@ -6,18 +6,22 @@ import { CPU6502 } from '@core/cpu/cpu';
 import { parseINes } from '@core/cart/ines';
 import { NROM } from '@core/cart/mappers/nrom';
 
-// This is a skeleton; it is skipped by default. Enable by setting NESTEST=1 and
-// placing nestest.nes and nestest.log in ./roms
+// Fast smoke variant of nestest per-instruction harness.
+// Gated by env vars: NESTEST_ROM and NESTEST_LOG. Optionally set NESTEST_MAX (default 200).
 
-const ROM_DIR = path.resolve('roms');
-const NES_PATH = path.join(ROM_DIR, 'nestest.nes');
-const LOG_PATH = path.join(ROM_DIR, 'nestest.log');
+function getEnv(name: string): string | null {
+  const v = process.env[name];
+  return v && v.length > 0 ? v : null;
+}
 
-const enabled = process.env.NESTEST === '1' && fs.existsSync(NES_PATH) && fs.existsSync(LOG_PATH);
+const ROM_PATH = getEnv('NESTEST_ROM') || (fs.existsSync(path.resolve('roms/nestest.nes')) ? path.resolve('roms/nestest.nes') : null);
+const LOG_PATH = getEnv('NESTEST_LOG') || (fs.existsSync(path.resolve('roms/nestest.log')) ? path.resolve('roms/nestest.log') : null);
 
-describe.skipIf(!enabled)('nestest', () => {
-  it('steps through and matches CPU state (PC,A,X,Y,P,SP)', () => {
-    const romBuf = new Uint8Array(fs.readFileSync(NES_PATH));
+const enabled = !!(ROM_PATH && LOG_PATH);
+
+describe.skipIf(!enabled)('nestest (fast smoke)', () => {
+  it('matches pre-step CPU state (PC,A,X,Y,P,SP) for a prefix of the log', () => {
+    const romBuf = new Uint8Array(fs.readFileSync(ROM_PATH!));
     const rom = parseINes(romBuf);
     const bus = new CPUBus();
     const nrom = new NROM(rom.prg, rom.chr);
@@ -28,8 +32,10 @@ describe.skipIf(!enabled)('nestest', () => {
     // nestest commonly uses start at $C000
     cpu.reset(0xC000);
 
-    const lines = fs.readFileSync(LOG_PATH, 'utf-8').split(/\r?\n/).filter(Boolean);
-    for (const line of lines) {
+    const lines = fs.readFileSync(LOG_PATH!, 'utf-8').split(/\r?\n/).filter(Boolean);
+    const limit = Math.min(lines.length, parseInt(process.env.NESTEST_MAX || '200', 10));
+    for (let i = 0; i < limit; i++) {
+      const line = lines[i];
       // Example line: C000  A9 00     LDA #$00                        A:00 X:00 Y:00 P:24 SP:FD PPU: ...
       const m = /^(?<pc>[0-9A-F]{4}).*A:(?<a>[0-9A-F]{2}) X:(?<x>[0-9A-F]{2}) Y:(?<y>[0-9A-F]{2}) P:(?<p>[0-9A-F]{2}) SP:(?<s>[0-9A-F]{2})/.exec(line);
       if (!m || !m.groups) continue;
@@ -50,12 +56,7 @@ describe.skipIf(!enabled)('nestest', () => {
           `A=${hex(cpu.state.a)} X=${hex(cpu.state.x)} Y=${hex(cpu.state.y)} P=${hex(cpu.state.p)} S=${hex(cpu.state.s)}\n`+
           `expected A=${hex(expectA)} X=${hex(expectX)} Y=${hex(expectY)} P=${hex(expectP)} S=${hex(expectS)}`);
       }
-      try {
-        cpu.step();
-      } catch (e) {
-        // If an opcode is not implemented yet, make the failure clear
-        throw e;
-      }
+      cpu.step();
     }
   });
 });

@@ -15,6 +15,8 @@ export class CPU6502 {
   state: CPUState;
   private nmiPending = false;
   private irqPending = false;
+  private jammed = false; // set when encountering JAM/KIL in strict mode
+  private illegalMode: 'lenient' | 'strict' = 'lenient';
   // simple trace ring for debugging
   private tracePC: number[] = new Array(64).fill(0);
   private traceIdx = 0;
@@ -29,8 +31,11 @@ export class CPU6502 {
 
   reset(vector: Word) {
     this.state = { a: 0, x: 0, y: 0, s: 0xfd, pc: vector & 0xffff, p: 0x24, cycles: 0 };
-    this.nmiPending = false; this.irqPending = false;
+    this.nmiPending = false; this.irqPending = false; this.jammed = false;
   }
+
+  // Configure behavior for unofficial KIL/JAM opcodes
+  setIllegalMode(mode: 'lenient' | 'strict') { this.illegalMode = mode; }
 
   requestNMI() { this.nmiPending = true; }
   requestIRQ() { this.irqPending = true; }
@@ -198,6 +203,8 @@ export class CPU6502 {
   }
 
   step(): void {
+    // If jammed (strict KIL), halt execution (no further cycles progress)
+    if (this.jammed) return;
     // Service interrupts between instructions
     if (this.serviceInterrupts()) return;
 
@@ -289,6 +296,8 @@ export class CPU6502 {
       
       // Unofficial: LAX (load A and X) - behaves like LDA then TAX
       case 0xA7: { const { addr } = this.adrZP(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 3; break; }      // LAX zp
+      // Unofficial: LAS abs,Y (0xBB): A,X,S = (mem & S); flags from A; cycles like LDA abs,Y
+      case 0xBB: { const { addr, crossed } = this.adrABSY(); const m = this.read(addr!); const val = m & s.s; s.a = val; s.x = val; s.s = val; this.setZN(s.a); s.cycles += 4 + (crossed ? 1 : 0); break; }
       case 0xB7: { const { addr } = this.adrZPY(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 4; break; }     // LAX zp,Y
       case 0xAF: { const { addr } = this.adrABS(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 4; break; }      // LAX abs
       case 0xBF: { const { addr, crossed } = this.adrABSY(); const v = this.read(addr!); s.a = v; s.x = v; this.setZN(v); s.cycles += 4 + (crossed ? 1 : 0); break; } // LAX abs,Y
@@ -305,6 +314,8 @@ export class CPU6502 {
       case 0x41: { const { addr } = this.adrINDX(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 6; break; }
       case 0x51: { const { addr, crossed } = this.adrINDY(); s.a = s.a ^ this.read(addr!); this.setZN(s.a); s.cycles += 5 + (crossed ? 1 : 0); break; }
       // ADC/SBC
+      // Unofficial: ANC (#imm) = AND then C = bit7(A)
+      case 0x0B: case 0x2B: { const { value } = this.adrIMM(); s.a = s.a & value!; this.setZN(s.a); this.setFlag(C, (s.a & 0x80) !== 0); s.cycles += 2; break; }
       case 0x69: { const { value } = this.adrIMM(); this.adc(value!); s.cycles += 2; break; }
       case 0x65: { const { addr } = this.adrZP(); this.adc(this.read(addr!)); s.cycles += 3; break; }
       case 0x75: { const { addr } = this.adrZPX(); this.adc(this.read(addr!)); s.cycles += 4; break; }
@@ -336,12 +347,28 @@ export class CPU6502 {
       case 0xCA: s.x = (s.x - 1) & 0xff; this.setZN(s.x); s.cycles += 2; break; // DEX
       case 0x88: s.y = (s.y - 1) & 0xff; this.setZN(s.y); s.cycles += 2; break; // DEY
       // Shifts/rotates (accumulator variants)
+      // Unofficial: ALR (#imm) = AND then LSR (C from pre-shift bit0)
+      case 0x4B: { const { value } = this.adrIMM(); let t = s.a & value!; const c0 = (t & 1) !== 0; t = (t >>> 1) & 0xff; s.a = t; this.setFlag(C, c0); this.setZN(s.a); s.cycles += 2; break; }
+      // Unofficial: ARR (#imm) = AND then ROR A (sets V and C specially)
+      case 0x6B: { const { value } = this.adrIMM(); const oldC = this.getFlag(C); let t = s.a & value!; let r = ((t >>> 1) | (oldC ? 0x80 : 0)) & 0xff; s.a = r; this.setZN(s.a); this.setFlag(C, (r & 0x40) !== 0); this.setFlag(V, ((r ^ ((r << 1) & 0xff)) & 0x40) !== 0); s.cycles += 2; break; }
       case 0x0A: { const c = (s.a & 0x80) !== 0; s.a = (s.a << 1) & 0xff; this.setFlag(C, c); this.setZN(s.a); s.cycles += 2; break; } // ASL A
       case 0x4A: { const c = (s.a & 0x01) !== 0; s.a = (s.a >>> 1) & 0xff; this.setFlag(C, c); this.setZN(s.a); s.cycles += 2; break; } // LSR A
       case 0x2A: { const c = this.getFlag(C); const newC = (s.a & 0x80) !== 0; s.a = ((s.a << 1) | (c ? 1 : 0)) & 0xff; this.setFlag(C, newC); this.setZN(s.a); s.cycles += 2; break; } // ROL A
       case 0x6A: { const c = this.getFlag(C); const newC = (s.a & 0x01) !== 0; s.a = ((s.a >>> 1) | (c ? 0x80 : 0)) & 0xff; this.setFlag(C, newC); this.setZN(s.a); s.cycles += 2; break; } // ROR A
       // Shifts/rotates (memory variants)
       case 0x06: { const { addr } = this.adrZP(); let v = this.read(addr!); const c = (v & 0x80) !== 0; v = (v << 1) & 0xff; this.write(addr!, v); this.setFlag(C, c); this.setZN(v); s.cycles += 5; break; } // ASL zp
+      
+      // --- Unofficial stores involving address-high+1 masking (approximations) ---
+      // SHY (0x9C) abs,X: store (Y & (high(addr)+1))
+      case 0x9C: { const { addr, crossed } = this.adrABSX(); const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.y & high; this.write(addr!, val); s.cycles += 5; break; }
+      // SHX (0x9E) abs,Y: store (X & (high(addr)+1))
+      case 0x9E: { const { addr, crossed } = this.adrABSY(); const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.x & high; this.write(addr!, val); s.cycles += 5; break; }
+      // TAS/SHS (0x9B) abs,Y: S = A & X; store (S & (high(addr)+1))
+      case 0x9B: { const { addr, crossed } = this.adrABSY(); s.s = s.a & s.x; const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.s & high; this.write(addr!, val); s.cycles += 5; break; }
+      // AHX/SHA (0x9F) abs,Y: store (A & X & (high(addr)+1))
+      case 0x9F: { const { addr, crossed } = this.adrABSY(); const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.a & s.x & high; this.write(addr!, val); s.cycles += 5; break; }
+      // AHX/SHA (0x93) (zp),Y: store (A & X & (high(addr)+1))
+      case 0x93: { const { addr, crossed } = this.adrINDY(); const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.a & s.x & high; this.write(addr!, val); s.cycles += 6; break; }
       case 0x16: { const { addr } = this.adrZPX(); let v = this.read(addr!); const c = (v & 0x80) !== 0; v = (v << 1) & 0xff; this.write(addr!, v); this.setFlag(C, c); this.setZN(v); s.cycles += 6; break; } // ASL zp,X
       case 0x0E: { const { addr } = this.adrABS(); let v = this.read(addr!); const c = (v & 0x80) !== 0; v = (v << 1) & 0xff; this.write(addr!, v); this.setFlag(C, c); this.setZN(v); s.cycles += 6; break; } // ASL abs
       case 0x1E: { const { addr } = this.adrABSX(); let v = this.read(addr!); const c = (v & 0x80) !== 0; v = (v << 1) & 0xff; this.write(addr!, v); this.setFlag(C, c); this.setZN(v); s.cycles += 7; break; } // ASL abs,X
@@ -410,6 +437,8 @@ export class CPU6502 {
       // BIT
       case 0x24: { const { addr } = this.adrZP(); const v = this.read(addr!); this.setFlag(Z, (s.a & v) === 0); this.setFlag(V, (v & 0x40) !== 0); this.setFlag(N, (v & 0x80) !== 0); s.cycles += 3; break; }
       case 0x2C: { const { addr } = this.adrABS(); const v = this.read(addr!); this.setFlag(Z, (s.a & v) === 0); this.setFlag(V, (v & 0x40) !== 0); this.setFlag(N, (v & 0x80) !== 0); s.cycles += 4; break; }
+      // Unofficial: BIT #imm (0x89) sets Z like BIT; N,V unaffected
+      case 0x89: { const { value } = this.adrIMM(); const v = value!; this.setFlag(Z, (s.a & v) === 0); s.cycles += 2; break; }
       // CMP/CPX/CPY
       case 0xC9: { const { value } = this.adrIMM(); this.cmp(s.a, value!); s.cycles += 2; break; }
       case 0xC5: { const { addr } = this.adrZP(); this.cmp(s.a, this.read(addr!)); s.cycles += 3; break; }
@@ -483,11 +512,20 @@ export class CPU6502 {
       // Unofficial NOPs commonly used by test ROMs (treat as NOP with proper read timing)
       case 0x1A: case 0x3A: case 0x5A: case 0x7A: case 0xDA: case 0xFA: // 1-byte NOP
         s.cycles += 2; break;
-      case 0x80: { this.fetch8(); s.cycles += 2; break; } // NOP #imm (2-byte)
+      // Unstable: XAA (#imm) approximated as A = X & imm
+      case 0x8B: { const { value } = this.adrIMM(); s.a = s.x & value!; this.setZN(s.a); s.cycles += 2; break; }
+      // Unofficial: AXS/SBX (#imm) = X = (A & X) - imm; C set as (A&X)>=imm
+      case 0xCB: { const { value } = this.adrIMM(); const t = (s.a & s.x) & 0xff; const imm = value!; const res = (t - imm) & 0xff; this.setFlag(C, t >= imm); s.x = res; this.setZN(s.x); s.cycles += 2; break; }
+      case 0x80: case 0x82: case 0xC2: case 0xE2: { this.fetch8(); s.cycles += 2; break; } // NOP #imm (2-byte variants)
       case 0x04: case 0x44: case 0x64: { this.adrZP(); s.cycles += 3; break; } // NOP zp
       case 0x14: case 0x34: case 0x54: case 0x74: case 0xD4: case 0xF4: { this.adrZPX(); s.cycles += 4; break; } // NOP zp,X
       case 0x0C: { this.adrABS(); s.cycles += 4; break; } // NOP abs
       case 0x1C: case 0x3C: case 0x5C: case 0x7C: case 0xDC: case 0xFC: { const { crossed } = this.adrABSX(); s.cycles += 4 + (crossed ? 1 : 0); break; } // NOP abs,X
+      
+      // KIL/JAM opcodes (unofficial): configurable behavior
+      case 0x02: case 0x12: case 0x22: case 0x32: case 0x42: case 0x52: case 0x62: case 0x72: case 0x92: case 0xB2: case 0xD2: case 0xF2:
+        if (this.illegalMode === 'strict') { this.jammed = true; return; } else { s.cycles += 2; break; }
+
       default: {
         const s0 = this.state;
         // record trace ring before throwing

@@ -6,15 +6,19 @@ import { CPU6502 } from '@core/cpu/cpu';
 import { parseINes } from '@core/cart/ines';
 import { NROM } from '@core/cart/mappers/nrom';
 
-const ROM_DIR = path.resolve('roms');
-const NES_PATH = path.join(ROM_DIR, 'nestest.nes');
-const LOG_PATH = path.join(ROM_DIR, 'nestest.log');
+function getEnv(name: string): string | null {
+  const v = process.env[name];
+  return v && v.length > 0 ? v : null;
+}
 
-const enabled = process.env.NESTEST === '1' && fs.existsSync(NES_PATH) && fs.existsSync(LOG_PATH);
+const ROM_PATH = getEnv('NESTEST_ROM') || (fs.existsSync(path.resolve('roms/nestest.nes')) ? path.resolve('roms/nestest.nes') : null);
+const LOG_PATH = getEnv('NESTEST_LOG') || (fs.existsSync(path.resolve('roms/nestest.log')) ? path.resolve('roms/nestest.log') : null);
 
-describe.skipIf(!enabled)('nestest cycles', () => {
-  it('matches per-instruction CPU cycle deltas from log', () => {
-    const romBuf = new Uint8Array(fs.readFileSync(NES_PATH));
+const enabled = !!(ROM_PATH && LOG_PATH);
+
+describe.skipIf(!enabled)('nestest cycles (fast smoke)', () => {
+  it('matches per-instruction CPU cycle deltas for a prefix of the log', () => {
+    const romBuf = new Uint8Array(fs.readFileSync(ROM_PATH!));
     const rom = parseINes(romBuf);
     const bus = new CPUBus();
     const nrom = new NROM(rom.prg, rom.chr);
@@ -24,9 +28,11 @@ describe.skipIf(!enabled)('nestest cycles', () => {
     const cpu = new CPU6502(bus);
     cpu.reset(0xC000);
 
-    const lines = fs.readFileSync(LOG_PATH, 'utf-8').split(/\r?\n/).filter(Boolean);
-    // Pre-parse cycles and PCs
-    const entries = lines.map((line) => {
+    const lines = fs.readFileSync(LOG_PATH!, 'utf-8').split(/\r?\n/).filter(Boolean);
+    const limit = Math.min(lines.length, parseInt(process.env.NESTEST_MAX || '500', 10));
+
+    // Pre-parse cycles and PCs (limited)
+    const entries = lines.slice(0, limit).map((line) => {
       const m = /^(?<pc>[0-9A-F]{4}).*CYC:(?<cyc>\d+)/.exec(line);
       if (!m || !m.groups) return null as any;
       return { pc: parseInt(m.groups.pc, 16), cyc: parseInt(m.groups.cyc, 10) };

@@ -22,6 +22,8 @@ let audioPump: number | null = null
 
 // Audio sample generator state
 const audioState: { lastCycles: number, targetCycles: number } = { lastCycles: 0, targetCycles: 0 }
+// Video fallback stepping state (when audio is not driving emulation)
+const videoState: { lastCycles: number } = { lastCycles: 0 }
 
 async function setupAudio() {
   if (audioCtx) return
@@ -134,13 +136,16 @@ function renderFrameToCanvas() {
 
 function frame() {
   if (!running || !sys) return
-  const startFrame = (sys.ppu as any).frame as number
-  // Step CPU instructions until the PPU advances one frame
-  let stepCount = 0
-  const stepCap = 5_000_000
-  while (((sys.ppu as any).frame as number) === startFrame && stepCount < stepCap) {
-    sys.stepInstruction()
-    stepCount++
+  // If audio pump is active, it drives CPU stepping. Otherwise, step roughly one video frame worth of CPU cycles here.
+  const audioActive = !!audioPump && !!audioCtx && audioCtx.state === 'running'
+  if (!audioActive) {
+    const nowCycles = sys.cpu.state.cycles
+    if (videoState.lastCycles === 0) videoState.lastCycles = nowCycles
+    const target = videoState.lastCycles + Math.floor(CPU_HZ / 60)
+    // Cap the amount of CPU work per RAF to avoid long stalls
+    let guard = 0
+    while (sys.cpu.state.cycles < target && guard < 200000) { sys.stepInstruction(); guard++ }
+    videoState.lastCycles = sys.cpu.state.cycles
   }
   renderFrameToCanvas()
   requestAnimationFrame(frame)
@@ -154,13 +159,21 @@ romInput.addEventListener('change', async () => {
   try {
     const rom = parseINes(buf)
     sys = new NESSystem(rom)
+    // Default to VT timing for accuracy; allow opting into legacy via ?legacy=1 or ?timing=legacy
+    const params = new URLSearchParams(window.location.search)
+    const forceLegacy = params.get('legacy') === '1' || params.get('timing') === 'legacy'
+    const useVT = !forceLegacy
+    ;(sys.ppu as any).setTimingMode?.(useVT ? 'vt' : 'legacy')
     sys.reset()
-    // Minimal rendering enable
+    // Minimal rendering enable (left masks on for stable CRCs/visuals)
     sys.io.write(0x2001, 0x1E)
+    // Lenient illegal opcodes by default to avoid jams on bad data; allow strict via ?strict=1
+    const strict = params.get('strict') === '1'
+    ;(sys.cpu as any).setIllegalMode?.(strict ? 'strict' : 'lenient')
     // Prepare audio context on user gesture (start)
     startBtn.disabled = false
     pauseBtn.disabled = true
-    statusEl.textContent = 'Ready — press Start'
+    statusEl.textContent = `Ready — press Start${useVT ? ' (VT timing)' : ' (legacy timing)'}`
   } catch (e: any) {
     statusEl.textContent = 'Failed to load ROM'
     console.error(e)

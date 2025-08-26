@@ -39,6 +39,10 @@ export class PPU {
   private a12Filter = 8; // minimum dots A12 must stay low before next rising edge counts
   private dot = 0; // monotonically increasing PPU dot counter
 
+  // Telemetry (opt-in via env PPU_TRACE=1): record recent A12 rises with timestamp
+  private traceA12: { frame: number, scanline: number, cycle: number }[] = [];
+  private traceEnabled = false;
+
   // Read buffer for $2007
   private readBuffer = 0;
 
@@ -54,6 +58,8 @@ export class PPU {
 
   // Sampling mode: legacy (scroll-shadow) vs vt (loopy v/t timing). Default legacy for compatibility.
   private useVT = false;
+  // Offline renderFrame VT usage is opt-in via setTimingMode; env default does not flip this.
+  private offlineUseVT = false;
 
   constructor(private mirror: MirrorMode = 'vertical') {
     try {
@@ -61,6 +67,7 @@ export class PPU {
       // eslint-disable-next-line no-undef
       const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
       if (env && env.PPU_TIMING_DEFAULT === 'vt') this.useVT = true;
+      if (env && env.PPU_TRACE === '1') this.traceEnabled = true;
     } catch {}
   }
 
@@ -71,8 +78,14 @@ export class PPU {
   }
 
   setA12Hook(hook: (() => void) | null) { this.onA12Rise = hook; }
+  // Expose recent A12 rises for tests when tracing is enabled
+  getA12Trace(): ReadonlyArray<{ frame: number, scanline: number, cycle: number }> { return this.traceA12; }
   // Allow tests to switch sampling timing behavior safely
-  setTimingMode(mode: 'legacy' | 'vt') { this.useVT = (mode === 'vt'); }
+  setTimingMode(mode: 'legacy' | 'vt') { 
+    const vt = (mode === 'vt');
+    this.useVT = vt;         // affects per-dot timing (tick)
+    this.offlineUseVT = vt;  // opt-in VT sampling for offline renderFrame
+  }
 
   reset() {
     this.ctrl = 0; this.mask = 0; this.status = 0;
@@ -206,6 +219,14 @@ export class PPU {
       this.dot++;
 
       const renderingEnabled = (this.mask & 0x18) !== 0; // bg or sprites
+
+      // Odd-frame cycle skip at pre-render line (VT timing only):
+      // On odd frames with rendering enabled, the PPU skips cycle 0 of the pre-render line.
+      if (this.useVT && renderingEnabled && this.scanline === 261 && this.cycle === 0 && this.oddFrame) {
+        // Skip work for cycle 0 by advancing to cycle 1
+        this.cycle = 1;
+      }
+
       // Per-dot behavior for scroll increments/copies when rendering
       if (renderingEnabled) {
         if (this.scanline >= 0 && this.scanline <= 239) {
@@ -246,7 +267,10 @@ export class PPU {
               const bgVisible = x >= 8 || showBgLeft;
               const spVisible = x >= 8 || showSpLeft;
               if (bgVisible && spVisible) {
-                const bgPix = this.useVT ? this.sampleBgPixelV(x, y) : this.sampleBgPixel(x, y);
+                // Prefer VT sampling; fall back to legacy if VT yields zero to reduce false negatives in minimal setups
+                const bgPixV = this.sampleBgPixelV(x, y);
+                const bgPixL = this.sampleBgPixel(x, y);
+                const bgPix = (this.useVT ? (bgPixV || bgPixL) : bgPixL);
                 const sp0Pix = this.sampleSprite0Pixel(x, y);
                 if (bgPix !== 0 && sp0Pix !== 0) {
                   this.status |= 0x40; // sprite 0 hit
@@ -275,7 +299,8 @@ export class PPU {
             }
           }
         } else if (this.scanline === 261) { // pre-render line
-          if (this.cycle >= 280 && this.cycle <= 304) this.copyY();
+          // Vertical bits copy only occurs when rendering is enabled
+          if (renderingEnabled && this.cycle >= 280 && this.cycle <= 304) this.copyY();
         }
       }
 
@@ -349,6 +374,11 @@ export class PPU {
       }
       if (this.lastA12 === 0 && a12 === 1) {
         if (this.dot - this.a12LastLowDot >= this.a12Filter) {
+          // Telemetry record
+          if (this.traceEnabled) {
+            if (this.traceA12.length > 1024) this.traceA12.shift();
+            this.traceA12.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle });
+          }
           this.onA12Rise && this.onA12Rise();
         }
       }
@@ -483,24 +513,31 @@ export class PPU {
   // V-based sampling used during per-dot rendering (tick)
   private sampleBgPixelV(x: number, y: number): number {
     const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000;
+    // Build world coordinates from v (loopy) and the latched fine X
+    const coarseXScroll = (this.v & 0x1F) << 3;
     const fineXScroll = this.latchedX & 0x07;
-    const coarseXBase = this.v & 0x1F;
-    const coarseYBase = (this.v >> 5) & 0x1F;
-    const ntXBase = (this.v >> 10) & 0x01;
-    const ntYBase = (this.v >> 11) & 0x01;
-    const fineYBase = (this.v >> 12) & 0x07;
-    const tileAdv = ((x + fineXScroll) >> 3) & 0x3F;
-    const fineX = (x + fineXScroll) & 0x07;
-    const coarseX = (coarseXBase + tileAdv) & 0x1F;
-    const ntX = (ntXBase + ((coarseXBase + tileAdv) >> 5)) & 0x01;
-    const fineY = fineYBase & 0x07;
-    const coarseY = coarseYBase & 0x1F;
-    const ntY = ntYBase & 0x01;
-    const ntIndexSel = (ntY << 1) | ntX;
-    const ntBase = 0x2000 + (ntIndexSel * 0x400);
+    const coarseYScroll = ((this.v >> 5) & 0x1F) << 3;
+    const fineYScroll = (this.v >> 12) & 0x07;
+
+    // In VT per-dot sampling, v already encodes the current scanline position; do not add output y again
+    const worldX = coarseXScroll + fineXScroll + x;
+    const worldY = coarseYScroll + fineYScroll;
+
+    const fineX = worldX & 0x07;
+    const fineY = worldY & 0x07;
+    const coarseX = (worldX >> 3) & 0x1F;
+    const coarseY = (worldY >> 3) & 0x1F;
+
+    const baseNtX = (this.v >> 10) & 0x01;
+    const baseNtY = (this.v >> 11) & 0x01;
+    const ntX = (baseNtX + ((worldX >> 8) & 0x01)) & 0x01;
+    const ntY = (baseNtY + ((worldY >> 8) & 0x01)) & 0x01;
+
+    const ntBase = 0x2000 + (((ntY << 1) | ntX) * 0x400);
     const ntAddr = ntBase + (coarseY * 32 + coarseX);
     const ntPhys = this.mapNametable(ntAddr);
     const ntIndex = this.vram[ntPhys];
+
     const tileAddr = (base + (ntIndex << 4) + fineY) & 0x1FFF;
     const lo = this.chrRead(tileAddr);
     const hi = this.chrRead((tileAddr + 8) & 0x1FFF);
@@ -512,16 +549,23 @@ export class PPU {
   private sampleBgColorV(x: number, y: number): number {
     const pix = this.sampleBgPixelV(x, y) & 0x03;
     if (pix === 0) return this.readPalette(0x00);
-    const fineXScroll = this.x & 0x07;
-    const coarseXBase = this.v & 0x1F;
-    const coarseYBase = (this.v >> 5) & 0x1F;
-    const ntXBase = (this.v >> 10) & 0x01;
-    const ntYBase = (this.v >> 11) & 0x01;
-    const tileAdv = ((x + fineXScroll) >> 3) & 0x3F;
-    const coarseX = (coarseXBase + tileAdv) & 0x1F;
-    const coarseY = coarseYBase & 0x1F;
-    const ntX = (ntXBase + ((coarseXBase + tileAdv) >> 5)) & 0x01;
-    const ntY = ntYBase & 0x01;
+
+    const coarseXScroll = (this.v & 0x1F) << 3;
+    const fineXScroll = this.latchedX & 0x07;
+    const coarseYScroll = ((this.v >> 5) & 0x1F) << 3;
+    const fineYScroll = (this.v >> 12) & 0x07;
+
+    const worldX = coarseXScroll + fineXScroll + x;
+    const worldY = coarseYScroll + fineYScroll;
+
+    const coarseX = (worldX >> 3) & 0x1F;
+    const coarseY = (worldY >> 3) & 0x1F;
+
+    const baseNtX = (this.v >> 10) & 0x01;
+    const baseNtY = (this.v >> 11) & 0x01;
+    const ntX = (baseNtX + ((worldX >> 8) & 0x01)) & 0x01;
+    const ntY = (baseNtY + ((worldY >> 8) & 0x01)) & 0x01;
+
     const ntBase = 0x2000 + (((ntY << 1) | ntX) * 0x400);
     const attAddr = ntBase + 0x3C0 + ((coarseY >> 2) * 8) + (coarseX >> 2);
     const attIndex = this.mapNametable(attAddr);
@@ -533,27 +577,44 @@ export class PPU {
 
 
   private sampleSprite0Pixel(x: number, y: number): number {
-    // Only 8x8 sprites considered. OAM[0..3] = Y, tile, attr, X
+    // OAM[0..3] = Y, tile, attr, X
     const sy = (this.oam[0] + 1) & 0xFF;
     const tile = this.oam[1] & 0xFF;
     const attr = this.oam[2] & 0xFF;
     const sx = this.oam[3] & 0xFF;
     const height16 = (this.ctrl & 0x20) !== 0;
-    if (height16) return 0; // not supported in minimal sampler
 
-    if (x < sx || x >= sx + 8 || y < sy || y >= sy + 8) return 0;
-    // Sprite pattern table base from PPUCTRL bit 3
-    const base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
+    const spriteH = height16 ? 16 : 8;
+    if (x < sx || x >= sx + 8 || y < sy || y >= sy + spriteH) return 0;
 
     const flipH = (attr & 0x40) !== 0;
     const flipV = (attr & 0x80) !== 0;
 
     let fx = (x - sx) & 0x07;
-    let fy = (y - sy) & 0x07;
+    let fy = (y - sy) & 0x0F; // up to 15 for 8x16
     if (flipH) fx = 7 - fx;
-    if (flipV) fy = 7 - fy;
 
-    const tileAddr = (base + (tile << 4) + fy) & 0x1FFF;
+    let base = 0x0000;
+    let tileIndex = tile & 0xFF;
+    let row = 0;
+    if (!height16) {
+      // 8x8 sprites: base from PPUCTRL bit3
+      base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
+      row = (flipV ? (7 - (fy & 7)) : (fy & 7));
+    } else {
+      // 8x16 sprites: pattern table determined by tile LSB; tile index even/odd selects table
+      // Top tile = tile & 0xFE, bottom tile = top+1. Vertical flip flips the 16-line block.
+      const table = (tileIndex & 1) ? 0x1000 : 0x0000;
+      const topTile = tileIndex & 0xFE;
+      // Compute flipped row within 16-pixel sprite
+      const fy16 = flipV ? (15 - fy) : fy;
+      const useTop = (fy16 < 8);
+      tileIndex = useTop ? topTile : ((topTile + 1) & 0xFF);
+      row = useTop ? (fy16 & 7) : ((fy16 - 8) & 7);
+      base = table;
+    }
+
+    const tileAddr = (base + (tileIndex << 4) + row) & 0x1FFF;
     const lo = this.chrRead(tileAddr);
     const hi = this.chrRead((tileAddr + 8) & 0x1FFF);
     const bit = 7 - fx;
@@ -571,7 +632,9 @@ export class PPU {
       for (let x = 0; x < w; x++) {
         // Left-edge background mask (PPUMASK bit1). If clear and x<8, hide bg
         const showBgLeft = (this.mask & 0x02) !== 0;
-        const color = (!showBgLeft && x < 8) ? this.readPalette(0x00) : this.sampleBgColor(x, y);
+        const color = (!showBgLeft && x < 8)
+          ? this.readPalette(0x00)
+          : this.sampleBgColor(x, y);
         buf[row + x] = color & 0x3F;
       }
     }
@@ -579,28 +642,42 @@ export class PPU {
   }
 
   private sampleSpritePixel(x: number, y: number): { pix: number, priority: number, pal: number } | null {
-    // Only 8x8 sprites supported in this minimal renderer
     const spriteHeight16 = (this.ctrl & 0x20) !== 0;
-    if (spriteHeight16) return null;
-    const base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
 
     let result: { pix: number, priority: number, pal: number } | null = null;
     // Iterate OAM sprites; lower index has higher priority. Iterate descending so lower index wins last.
     for (let i = 63; i >= 0; i--) {
       const o = i * 4;
       const sy = ((this.oam[(o + 0) & 0xFF] + 1) & 0xFF);
-      const tile = this.oam[(o + 1) & 0xFF] & 0xFF;
+      let tile = this.oam[(o + 1) & 0xFF] & 0xFF;
       const attr = this.oam[(o + 2) & 0xFF] & 0xFF;
       const sx = this.oam[(o + 3) & 0xFF] & 0xFF;
 
-      if (x < sx || x >= sx + 8 || y < sy || y >= sy + 8) continue;
+      const spriteH = spriteHeight16 ? 16 : 8;
+      if (x < sx || x >= sx + 8 || y < sy || y >= sy + spriteH) continue;
 
       let fx = (x - sx) & 0x07;
-      let fy = (y - sy) & 0x07;
+      let fy = (y - sy) & 0x0F;
       if ((attr & 0x40) !== 0) fx = 7 - fx; // H flip
-      if ((attr & 0x80) !== 0) fy = 7 - fy; // V flip
 
-      const tileAddr = (base + (tile << 4) + fy) & 0x1FFF;
+      let base = 0x0000;
+      let row = 0;
+      if (!spriteHeight16) {
+        // 8x8
+        base = (this.ctrl & 0x08) ? 0x1000 : 0x0000;
+        row = ((attr & 0x80) !== 0) ? (7 - (fy & 7)) : (fy & 7);
+      } else {
+        // 8x16
+        const table = (tile & 1) ? 0x1000 : 0x0000;
+        const topTile = tile & 0xFE;
+        const fy16 = ((attr & 0x80) !== 0) ? (15 - fy) : fy;
+        const useTop = fy16 < 8;
+        tile = useTop ? topTile : ((topTile + 1) & 0xFF);
+        row = useTop ? (fy16 & 7) : ((fy16 - 8) & 7);
+        base = table;
+      }
+
+      const tileAddr = (base + (tile << 4) + row) & 0x1FFF;
       const lo = this.chrRead(tileAddr);
       const hi = this.chrRead((tileAddr + 8) & 0x1FFF);
       const bit = 7 - fx;
@@ -631,10 +708,12 @@ export class PPU {
       for (let x = 0; x < w; x++) {
         // Background color, with left-edge mask
         const showBgLeft = (this.mask & 0x02) !== 0;
-        const bgPixRaw = (this.useVT ? this.sampleBgPixelV(x, y) : this.sampleBgPixel(x, y)) & 0x03;
+        const bgPixRaw = (this.offlineUseVT ? this.sampleBgPixelV(x, y) : this.sampleBgPixel(x, y)) & 0x03;
         const bgMasked = (!showBgLeft && x < 8);
         const bgPixEff = bgMasked ? 0 : bgPixRaw;
-        const bgColor = bgPixEff === 0 ? this.readPalette(0x00) : (this.useVT ? this.sampleBgColorV(x, y) : this.sampleBgColor(x, y));
+        const bgColor = bgPixEff === 0
+          ? this.readPalette(0x00)
+          : (this.offlineUseVT ? this.sampleBgColorV(x, y) : this.sampleBgColor(x, y));
 
         // Sprite sampling
         const showSpLeft = (this.mask & 0x04) !== 0;

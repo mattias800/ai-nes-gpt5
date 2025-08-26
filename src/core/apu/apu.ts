@@ -275,6 +275,13 @@ export class APU {
     this.cycles = 0;
     this.stepIndex = 0;
     this.irqFlag = false;
+    // Immediate clocking when switching to 5-step mode: clock quarter and half frame units now
+    if (this.mode5) {
+      this.clockEnvelopes();
+      this.clockTriangleLinear();
+      this.clockLengthCounters();
+      this.clockSweeps();
+    }
   }
 
   write4015(value: number) {

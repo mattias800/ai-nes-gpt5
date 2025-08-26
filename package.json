@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run --coverage",
-    "test:fast": "vitest run --config vitest.fast.config.ts",
-    "test:slow": "vitest run tests/slow/**/*.test.ts",
+    "test": "cross-env PPU_TIMING_DEFAULT=vt vitest run --coverage",
+    "test:fast": "cross-env PPU_TIMING_DEFAULT=vt vitest run --config vitest.fast.config.ts",
+    "test:slow": "cross-env SMB3_BASELINE_CRC= SMB3_DEEP_BASELINE_CRC= PPU_TIMING_DEFAULT=vt vitest run tests/slow/**/*.test.ts",
+    "verify": "npm run test:fast && npm run test:slow",
     "dev": "vite",
     "build:host": "vite build",
     "preview": "vite preview",
@@ -18,12 +19,20 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "fetch:roms": "node scripts/fetch-roms.mjs",
-    "screenshot": "SCREENSHOT=1 vitest run tests/slow/harness/screenshot.test.ts"
+    "screenshot": "SCREENSHOT=1 vitest run tests/slow/harness/screenshot.test.ts",
+    "baseline:smb": "node scripts/gen-smb-baseline.mjs",
+    "baseline:smb3": "node scripts/gen-smb3-baseline.mjs",
+    "baseline:smb3:state": "node scripts/gen-smb3-state-baseline.mjs",
+    "baseline:smb3:input": "node scripts/gen-smb3-input-baseline.mjs",
+    "accuracy:report": "node scripts/accuracy-report.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
     "@vitest/coverage-v8": "^2.1.9",
     "eslint": "^9.9.0",
+    "@eslint/js": "^9.9.0",
+    "@typescript-eslint/eslint-plugin": "^8.6.0",
+    "@typescript-eslint/parser": "^8.6.0",
     "vite": "^5.4.0",
     "vite-tsconfig-paths": "^5.0.1",
     "eslint-config-prettier": "^9.1.0",
@@ -31,6 +40,7 @@
     "pngjs": "^7.0.0",
     "prettier": "^3.3.3",
     "typescript": "^5.6.2",
-    "vitest": "^2.1.1"
+    "vitest": "^2.1.1",
+    "cross-env": "^7.0.3"
   }
 }

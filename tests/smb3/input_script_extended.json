@@ -1,0 +1,31 @@
+{
+  "frames": 1800,
+  "steps": [
+    { "frame": 0,   "buttons": ["Start"] },
+    { "frame": 60,  "buttons": [] },
+    { "frame": 120, "buttons": ["Start"] },
+    { "frame": 180, "buttons": [] },
+    { "frame": 240, "buttons": ["Start"] },
+    { "frame": 300, "buttons": [] },
+    { "frame": 360, "buttons": ["Start"] },
+    { "frame": 420, "buttons": [] },
+    { "frame": 600, "buttons": ["A"] },
+    { "frame": 610, "buttons": [] },
+    { "frame": 700, "buttons": ["Start"] },
+    { "frame": 710, "buttons": [] },
+    { "frame": 900, "buttons": ["Right"] },
+    { "frame": 901, "buttons": [] },
+    { "frame": 960, "buttons": ["A"] },
+    { "frame": 980, "buttons": [] },
+    { "frame": 1200, "buttons": ["Right"] },
+    { "frame": 1201, "buttons": [] },
+    { "frame": 1350, "buttons": ["A"] },
+    { "frame": 1351, "buttons": [] }
+  ],
+  "checkpoints": [
+    { "frame": 600,  "tag": "post-title-or-file-select" },
+    { "frame": 1000, "tag": "map-entry" },
+    { "frame": 1500, "tag": "early-1-1" }
+  ]
+}
+

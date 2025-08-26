@@ -9,6 +9,7 @@ export interface Mapper {
   irqPending?(): boolean; // For mappers with IRQs (e.g., MMC3)
   clearIrq?(): void;
   notifyA12Rise?(): void; // Call when PPU A12 rises (MMC3)
+  setMirrorCallback?(cb: (mode: 'horizontal' | 'vertical') => void): void; // Optional: mapper-controlled mirroring
 }
 
 export interface CartWires {

@@ -169,7 +169,7 @@ romInput.addEventListener('change', async () => {
 
 startBtn.addEventListener('click', async () => {
   if (!sys) return
-  setupAudio()
+  await setupAudio()
   await audioCtx!.resume()
   startLoop()
 })

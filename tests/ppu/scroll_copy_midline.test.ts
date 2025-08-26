@@ -11,7 +11,7 @@ function writePPU(ppu: PPU, addr: number, val: number) {
   ppu.cpuWrite(0x2007, val & 0xFF);
 }
 
-describe.skip('PPU copyX timing at cycle 257', () => {
+describe('PPU copyX timing at cycle 257', () => {
   it('mid-scanline $2005 X writes do not affect pixels of the same scanline; effect starts next scanline', () => {
     const ppu = new PPU();
     ppu.reset();

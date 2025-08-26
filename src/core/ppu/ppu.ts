@@ -19,6 +19,7 @@ export class PPU {
   private t = 0; // temp VRAM addr (15 bits)
   private v = 0; // current VRAM addr (15 bits)
   private x = 0; // fine X scroll (3 bits)
+  private latchedX = 0; // fine X latched at start of visible scanline for vt sampling
   // Shadow scroll values used by sampling (updated only by PPUSCROLL writes)
   private scrollCoarseX = 0; // 0..31
   private scrollCoarseY = 0; // 0..31
@@ -75,6 +76,7 @@ export class PPU {
     this.framebuffer.fill(0);
     // Scroll shadow reset
     this.scrollCoarseX = 0; this.scrollCoarseY = 0; this.scrollFineY = 0;
+    this.latchedX = 0;
     // A12 filter state
     this.lastA12 = 0; this.a12LastLowDot = 0; this.dot = 0;
   }
@@ -206,6 +208,8 @@ export class PPU {
 
           // Sprite overflow evaluation at start of visible scanline (approximation):
           if (this.cycle === 1) {
+            // Latch fine X for vt sampling so mid-scanline $2005 writes don't affect current scanline
+            this.latchedX = this.x & 0x07;
             const height16 = (this.ctrl & 0x20) !== 0;
             const spriteHeight = height16 ? 16 : 8;
             let count = 0;
@@ -472,7 +476,7 @@ export class PPU {
   // V-based sampling used during per-dot rendering (tick)
   private sampleBgPixelV(x: number, y: number): number {
     const base = (this.ctrl & 0x10) ? 0x1000 : 0x0000;
-    const fineXScroll = this.x & 0x07;
+    const fineXScroll = this.latchedX & 0x07;
     const coarseXBase = this.v & 0x1F;
     const coarseYBase = (this.v >> 5) & 0x1F;
     const ntXBase = (this.v >> 10) & 0x01;

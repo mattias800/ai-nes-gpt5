@@ -47,32 +47,7 @@ describe.skip('Debug scroll sampling', () => {
     // Enable bg left and bg
     ppu.cpuWrite(0x2001, 0x0A);
 
-    // Introspect internal addressing for the first pixel
-    const t = (ppu as any).t as number;
-    const xFine = (ppu as any).x as number;
-    const coarseXScroll = (t & 0x1F) << 3;
-    const coarseYScroll = ((t >> 5) & 0x1F) << 3;
-    const fineYScroll = (t >> 12) & 0x07;
-    const worldX = coarseXScroll + (xFine & 7) + 0;
-    const worldY = coarseYScroll + fineYScroll + 0;
-    expect({ coarseXScroll, xFine }).toEqual({ coarseXScroll: 248, xFine: 0 });
-    expect(worldX).toBe(248);
-    const coarseX = (worldX >> 3) & 0x1F;
-    const coarseY = (worldY >> 3) & 0x1F;
-    const baseNtX = (t >> 10) & 1;
-    const baseNtY = (t >> 11) & 1;
-    expect(baseNtX).toBe(0);
-    const ntX = (baseNtX + ((worldX >> 8) & 1)) & 1;
-    const ntY = (baseNtY + ((worldY >> 8) & 1)) & 1;
-    expect(ntX).toBe(0);
-    const ntIndexSel = (ntY << 1) | ntX;
-    const ntBase = 0x2000 + (ntIndexSel * 0x400);
-    const ntAddr = ntBase + (coarseY * 32 + coarseX);
-    const ntPhys = (ppu as any).mapNametable(ntAddr) as number;
-    expect(ntPhys).toBe(0x001F);
-    const tileIndex = (ppu as any).vram[ntPhys] as number;
-    expect(tileIndex).toBe(1);
-
+    // Validate sampling at the first pixel via public samplers and framebuffer
     const pix = ppu.sampleBgPixel(0, 0);
     expect(pix).toBe(1);
 

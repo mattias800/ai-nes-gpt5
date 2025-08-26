@@ -45,6 +45,7 @@ export class NESSystem {
     const vec = this.bus.read(0xfffc) | (this.bus.read(0xfffd) << 8);
     this.cpu.reset(vec);
     this.ppu.reset();
+    this.cart.reset();
   }
 
   // Step one instruction, servicing NMI/IRQ based on PPU and mapper state

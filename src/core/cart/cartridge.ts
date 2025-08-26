@@ -25,4 +25,11 @@ export class Cartridge {
   writeCpu(addr: Word, v: Byte): void { this.mapper.cpuWrite(addr, v); }
   readChr(addr: Word): Byte { return this.mapper.ppuRead(addr); }
   writeChr(addr: Word, v: Byte): void { this.mapper.ppuWrite(addr, v); }
+
+  reset(): void {
+    // Reset mapper state if it has a reset method
+    if (typeof (this.mapper as any).reset === 'function') {
+      (this.mapper as any).reset();
+    }
+  }
 }

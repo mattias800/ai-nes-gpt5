@@ -25,7 +25,10 @@
     "baseline:smb3:state": "node scripts/gen-smb3-state-baseline.mjs",
     "baseline:smb3:input": "node scripts/gen-smb3-input-baseline.mjs",
     "baseline:smb3:input:extended": "node scripts/gen-smb3-input-extended-baseline.mjs",
-    "accuracy:report": "node scripts/accuracy-report.mjs"
+    "accuracy:report": "node scripts/accuracy-report.mjs",
+    "nestest:trace": "tsx -r tsconfig-paths/register scripts/run-nestest-trace.ts",
+    "nestest:diff": "mkdir -p out && npm run nestest:trace -- --max=${NESTEST_MAX:-0} > out/nestest.trace && diff -u roms/nestest.log out/nestest.trace || true",
+    "nestest:compare": "tsx -r tsconfig-paths/register scripts/compare-nestest.ts"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
@@ -42,6 +45,8 @@
     "prettier": "^3.3.3",
     "typescript": "^5.6.2",
     "vitest": "^2.1.1",
-    "cross-env": "^7.0.3"
+    "cross-env": "^7.0.3",
+    "tsx": "^4.16.2",
+    "tsconfig-paths": "^4.2.0"
   }
 }

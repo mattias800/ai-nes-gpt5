@@ -22,12 +22,27 @@ export class CPU6502 {
   private traceIdx = 0;
   // optional external per-instruction trace hook
   private traceHook: ((pc: number, opcode: number) => void) | null = null;
+  // optional extra per-instruction hook (effective address, page-cross)
+  private extraTraceHook: ((info: { pc: number, opcode: number, ea: number | null, crossed: boolean }) => void) | null = null;
+  private lastEA: number | null = null;
+  private lastCrossed = false;
   constructor(private bus: CPUBus) {
     this.state = { a: 0, x: 0, y: 0, s: 0xfd, pc: 0, p: 0x24, cycles: 0 };
   }
 
   // Enable/disable a per-instruction trace callback (for harness debugging)
   setTraceHook(fn: ((pc: number, opcode: number) => void) | null) { this.traceHook = fn; }
+  // Optional extra trace (effective address, page-cross)
+  setExtraTraceHook(fn: ((info: { pc: number, opcode: number, ea: number | null, crossed: boolean }) => void) | null) { this.extraTraceHook = fn; }
+  // Read back a copy of the recent PC ring (oldest->newest), up to count entries
+  getRecentPCs(count = 16): number[] {
+    const n = Math.min(count, this.tracePC.length, this.traceIdx);
+    const out: number[] = [];
+    for (let i = this.traceIdx - n; i < this.traceIdx; i++) {
+      out.push(this.tracePC[i & 63]);
+    }
+    return out;
+  }
 
   reset(vector: Word) {
     this.state = { a: 0, x: 0, y: 0, s: 0xfd, pc: vector & 0xffff, p: 0x24, cycles: 0 };
@@ -128,19 +143,23 @@ export class CPU6502 {
 
   // Addressing modes return {addr?, value?, crossed?}
   private adrIMM() { return { value: this.fetch8(), crossed: false }; }
-  private adrZP() { return { addr: this.fetch8(), crossed: false }; }
-  private adrZPX() { return { addr: (this.fetch8() + this.state.x) & 0xff, crossed: false }; }
-  private adrZPY() { return { addr: (this.fetch8() + this.state.y) & 0xff, crossed: false }; }
-  private adrABS() { return { addr: this.fetch16(), crossed: false }; }
+  private adrZP() { const addr = this.fetch8(); this.lastEA = addr; this.lastCrossed = false; return { addr, crossed: false }; }
+  private adrZPX() { const addr = (this.fetch8() + this.state.x) & 0xff; this.lastEA = addr; this.lastCrossed = false; return { addr, crossed: false }; }
+  private adrZPY() { const addr = (this.fetch8() + this.state.y) & 0xff; this.lastEA = addr; this.lastCrossed = false; return { addr, crossed: false }; }
+  private adrABS() { const addr = this.fetch16(); this.lastEA = addr; this.lastCrossed = false; return { addr, crossed: false }; }
   private adrABSX() {
     const base = this.fetch16();
     const addr = (base + this.state.x) & 0xffff;
-    return { addr, crossed: (base & 0xff00) !== (addr & 0xff00) };
+    const crossed = (base & 0xff00) !== (addr & 0xff00);
+    this.lastEA = addr; this.lastCrossed = crossed;
+    return { addr, crossed };
   }
   private adrABSY() {
     const base = this.fetch16();
     const addr = (base + this.state.y) & 0xffff;
-    return { addr, crossed: (base & 0xff00) !== (addr & 0xff00) };
+    const crossed = (base & 0xff00) !== (addr & 0xff00);
+    this.lastEA = addr; this.lastCrossed = crossed;
+    return { addr, crossed };
   }
   private adrIND() {
     // 6502 JMP indirect bug emulation
@@ -148,13 +167,17 @@ export class CPU6502 {
     const lo = this.read(ptr);
     const hiAddr = (ptr & 0xff00) | ((ptr + 1) & 0x00ff);
     const hi = this.read(hiAddr);
-    return { addr: lo | (hi << 8), crossed: false };
+    const addr = lo | (hi << 8);
+    this.lastEA = addr; this.lastCrossed = false;
+    return { addr, crossed: false };
   }
   private adrINDX() {
     const zp = (this.fetch8() + this.state.x) & 0xff;
     const lo = this.read(zp);
     const hi = this.read((zp + 1) & 0xff);
-    return { addr: lo | (hi << 8), crossed: false };
+    const addr = lo | (hi << 8);
+    this.lastEA = addr; this.lastCrossed = false;
+    return { addr, crossed: false };
   }
   private adrINDY() {
     const zp = this.fetch8();
@@ -162,7 +185,9 @@ export class CPU6502 {
     const hi = this.read((zp + 1) & 0xff);
     const base = lo | (hi << 8);
     const addr = (base + this.state.y) & 0xffff;
-    return { addr, crossed: (base & 0xff00) !== (addr & 0xff00) };
+    const crossed = (base & 0xff00) !== (addr & 0xff00);
+    this.lastEA = addr; this.lastCrossed = crossed;
+    return { addr, crossed };
   }
 
   private adc(val: Byte) {
@@ -209,6 +234,7 @@ export class CPU6502 {
     if (this.serviceInterrupts()) return;
 
     const pcBefore = this.state.pc;
+    this.lastEA = null; this.lastCrossed = false;
     // record every step
     this.tracePC[this.traceIdx & 63] = pcBefore;
     this.traceIdx++;
@@ -558,5 +584,6 @@ export class CPU6502 {
         throw new Error(msg);
       }
     }
+    if (this.extraTraceHook) { try { this.extraTraceHook({ pc: pcBefore, opcode, ea: this.lastEA, crossed: this.lastCrossed }); } catch {} }
   }
 }

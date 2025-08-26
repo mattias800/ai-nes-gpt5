@@ -61,6 +61,18 @@ ROM-driven deterministic baselines
     - Extended checkpoints: `npm run baseline:smb3:input:extended -- --script=tests/smb3/input_script_extended.json --rom=/path/to/smb3.nes`
   - Optional state CRC baselines: `npm run baseline:smb3:state -- --frames=60 --rom=/path/to/smb3.nes`
 
+Nestest CPU trace and comparator
+- Place nestest.nes and nestest.log under ./roms or set env vars:
+  - NESTEST_ROM=/absolute/path/to/nestest.nes
+  - NESTEST_LOG=/absolute/path/to/nestest.log
+- Generate stdout trace and diff (prefix with NESTEST_MAX to limit):
+  - NESTEST_MAX=500 npm run nestest:diff
+- Lockstep comparison (halts on first mismatch, prints diagnostics):
+  - NESTEST_MAX=2000 npm run nestest:compare
+  - npm run nestest:compare (full log)
+- Optional instrumentation during trace:
+  - NESTEST_TRACE_EXTRA=1 npm run nestest:trace -- --max=200
+
 Optional screenshots and artifacts
 - PNG screenshots (background-only and full):
   - Command: `npm run screenshot`

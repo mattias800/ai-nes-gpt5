@@ -27,6 +27,22 @@ export class NESSystem {
     if (four) this.ppu.setMirroring('four'); else this.ppu.setMirroring(vert ? 'vertical' : 'horizontal');
     // Allow mapper (e.g., MMC3) to control nametable mirroring dynamically via A000 writes
     if (mapper.setMirrorCallback) mapper.setMirrorCallback((mode: 'horizontal' | 'vertical') => this.ppu.setMirroring(mode));
+    if (mapper.setTimeProvider) mapper.setTimeProvider(() => ({ frame: this.ppu.frame, scanline: this.ppu.scanline, cycle: this.ppu.cycle }));
+    if (mapper.setCtrlProvider) mapper.setCtrlProvider(() => {
+      // Provide an 'effective' ctrl for mapper telemetry that reflects which plane would drive $1000 pulses
+      const ctrl = ((this.ppu as any).getCtrlLine ? (this.ppu as any).getCtrlLine() : this.ppu.ctrl) & 0xFF;
+      const mask = this.ppu.mask & 0xFF;
+      const spUses1000 = (ctrl & 0x08) !== 0;
+      const bgUses1000 = (ctrl & 0x10) !== 0;
+      const spOn = (mask & 0x10) !== 0;
+      const bgOn = (mask & 0x08) !== 0;
+      let eff = ctrl & 0x18;
+      // If neither plane is configured for $1000 but BG-only is enabled, treat as BG@$1000 for classification purposes
+      if (!bgUses1000 && !spUses1000) {
+        if (bgOn && !spOn) eff |= 0x10;
+      }
+      return eff & 0xFF;
+    });
     this.io = new NesIO(this.ppu, this.bus);
     this.bus.connectIO(this.io.read, this.io.write);
     this.bus.connectCart((a) => this.cart.readCpu(a), (a, v) => this.cart.writeCpu(a, v));
@@ -48,6 +64,13 @@ export class NESSystem {
     this.cart.reset();
   }
 
+  // Perform a CPU-only reset, preserving PPU and mapper state (closer to warm reset semantics)
+  cpuResetOnly() {
+    const vec = this.bus.read(0xfffc) | (this.bus.read(0xfffd) << 8);
+    this.cpu.reset(vec);
+    // Intentionally do not reset PPU or Cartridge/mapper
+  }
+
   // Step one instruction, servicing NMI/IRQ based on PPU and mapper state
   stepInstruction() {
     // Deliver NMI from PPU before CPU step if pending
@@ -55,39 +78,47 @@ export class NESSystem {
       this.cpu.requestNMI();
       this.ppu.nmiOccurred = false; // edge-triggered
     }
-    // Deliver mapper IRQs (e.g., MMC3) before CPU step
+    // Compute IRQ line level before CPU step (level-sensitive)
     const mapper: any = (this.cart as any).mapper;
-    if (mapper.irqPending && mapper.irqPending()) {
-      this.cpu.requestIRQ();
-      mapper.clearIrq && mapper.clearIrq();
-    }
-    // (APU IRQs are delivered after the CPU step once APU has been ticked)
+    let irqLine = false;
+    if (mapper.irqPending && mapper.irqPending()) irqLine = true;
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const disableApuIrq = !!(env && env.DISABLE_APU_IRQ === '1');
+      if (!disableApuIrq) {
+        if (this.apu && this.apu.dmcIrqPending && this.apu.dmcIrqPending()) irqLine = true;
+        if (this.apu && (this.apu as any).frameIrqPending && (this.apu as any).frameIrqPending()) irqLine = true;
+      }
+    } catch {}
+    this.cpu.setIrqLine(irqLine);
 
-    const before = this.cpu.state.cycles;
+    // Install per-cycle hook so bus-access cycles are interleaved with PPU/APU
+    this.cpu.setCycleHook((cycles: number) => {
+      if (cycles <= 0) return;
+      // Aggregate ticks for efficiency
+      this.ppu.tick(cycles * 3);
+      this.apu.tick(cycles);
+    });
+
+    // Execute one CPU instruction; all cycles (bus + internal) will tick PPU/APU via the per-cycle hook.
     this.cpu.step();
-    const delta = this.cpu.state.cycles - before;
-    // Tick PPU at 3x CPU cycles
-    if (delta > 0) {
-      this.ppu.tick(delta * 3);
-      this.apu.tick(delta);
-    }
 
     // Deliver NMI if VBlank started during PPU tick
     if (this.ppu.nmiOccurred && this.ppu.nmiOutput) {
       this.cpu.requestNMI();
       this.ppu.nmiOccurred = false;
     }
-    // Deliver mapper IRQs after PPU tick
-    if (mapper.irqPending && mapper.irqPending()) {
-      this.cpu.requestIRQ();
-      mapper.clearIrq && mapper.clearIrq();
-    }
-    // Deliver APU IRQs after APU tick
-    if (this.apu && this.apu.dmcIrqPending && this.apu.dmcIrqPending()) {
-      this.cpu.requestIRQ();
-    }
-    if (this.apu && (this.apu as any).frameIrqPending && (this.apu as any).frameIrqPending()) {
-      this.cpu.requestIRQ();
-    }
+    // Recompute IRQ line after PPU/APU tick
+    irqLine = false;
+    if (mapper.irqPending && mapper.irqPending()) irqLine = true;
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const disableApuIrq = !!(env && env.DISABLE_APU_IRQ === '1');
+      if (!disableApuIrq) {
+        if (this.apu && this.apu.dmcIrqPending && this.apu.dmcIrqPending()) irqLine = true;
+        if (this.apu && (this.apu as any).frameIrqPending && (this.apu as any).frameIrqPending()) irqLine = true;
+      }
+    } catch {}
+    this.cpu.setIrqLine(irqLine);
   }
 }

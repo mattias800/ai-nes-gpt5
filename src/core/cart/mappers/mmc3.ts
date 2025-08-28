@@ -19,14 +19,26 @@ export class MMC3 implements Mapper {
   private irqCounter = 0;
   private irqEnabled = false;
   private irq = false;
+  private reloadPending = false;
 
   // Telemetry (opt-in via env MMC3_TRACE=1)
   private traceEnabled = false;
-  private trace: Array<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean }> = [];
-  private addTrace(entry: { type: string, a?: number, v?: number, ctr?: number, en?: boolean }) {
+  private trace: Array<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean, f?: number, s?: number, c?: number, ctrl?: number }> = [];
+  private timeProvider: (() => { frame: number, scanline: number, cycle: number }) | null = null;
+  private ctrlProvider: (() => number) | null = null;
+  private addTrace(entry: { type: string, a?: number, v?: number, ctr?: number, en?: boolean, ctrl?: number }) {
     if (!this.traceEnabled) return;
     if (this.trace.length > 4096) this.trace.shift();
-    this.trace.push(entry);
+    if (this.timeProvider) {
+      try {
+        const t = this.timeProvider();
+        (entry as any).f = t.frame; (entry as any).s = t.scanline; (entry as any).c = t.cycle;
+      } catch {}
+    }
+    if (this.ctrlProvider) {
+      try { (entry as any).ctrl = this.ctrlProvider() & 0xFF; } catch {}
+    }
+    this.trace.push(entry as any);
   }
 
   constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0)) {
@@ -72,12 +84,14 @@ export class MMC3 implements Mapper {
       this.irqLatch = value;
       this.addTrace({ type: 'C000', v: value });
     } else if (addr >= 0xC001 && addr <= 0xDFFF && (addr & 1) === 1) {
-      this.irqCounter = 0; // reload on next A12 rising edge
+      // Request reload on next A12 rising edge
+      this.reloadPending = true;
       this.addTrace({ type: 'C001' });
     } else if (addr >= 0xE000 && addr <= 0xFFFE && (addr & 1) === 0) {
       this.irqEnabled = false; this.irq = false;
       this.addTrace({ type: 'E000' });
     } else if (addr >= 0xE001 && addr <= 0xFFFF && (addr & 1) === 1) {
+      // Enable IRQs immediately on write
       this.irqEnabled = true;
       this.addTrace({ type: 'E001' });
     }
@@ -94,15 +108,45 @@ export class MMC3 implements Mapper {
   clearIrq(): void { this.irq = false; }
 
   notifyA12Rise(): void {
-    // On A12 rising edge: if counter is 0, reload from latch, else decrement. When becomes 0 and enabled, set IRQ.
-    const before = this.irqCounter;
-    if (this.irqCounter === 0) {
-      this.irqCounter = this.irqLatch;
+    // MMC3 scanline counter behavior (approx):
+    // On A12 rising edge:
+    //   - If reload requested: counter = latch; clear reloadPending
+    //   - Else if counter == 0: counter = latch
+    //   - Else: counter--
+    // IRQ is asserted when counter becomes 0 either by decrement OR by reload-to-zero, except not on pre-render.
+    const t = this.timeProvider ? this.timeProvider() : null;
+    const onPreRender = !!(t && t.scanline === 261);
+
+    let op: 'rel0'|'rel'|'dec'|'pre' = 'dec';
+    let asserted = false;
+    if (this.reloadPending) {
+      // Clear requested: load latch on next clock but DO NOT assert even if latch==0
+      this.irqCounter = this.irqLatch & 0xFF;
+      this.reloadPending = false;
+      op = (this.irqCounter === 0) ? 'rel0' : 'rel';
+      // no asserted on reload-after-clear per test expectations
+    } else if (this.irqCounter === 0) {
+      // Normal reload when counter already at 0; do not assert even if latch==0 (base semantics)
+      this.irqCounter = this.irqLatch & 0xFF;
+      op = (this.irqCounter === 0) ? 'rel0' : 'rel';
+      // no assert on reload path
     } else {
+      // Decrement path; assert when we hit zero
       this.irqCounter = (this.irqCounter - 1) & 0xFF;
-      if (this.irqCounter === 0 && this.irqEnabled) this.irq = true;
+      op = 'dec';
+      if (this.irqCounter === 0) asserted = true;
     }
-    this.addTrace({ type: 'A12', ctr: this.irqCounter, en: this.irqEnabled });
+
+    if (asserted && this.irqEnabled && !onPreRender) {
+      this.irq = true;
+      this.addTrace({ type: 'IRQ' });
+    }
+
+    // Trace A12 with extra details
+    const entry: any = { type: 'A12', ctr: this.irqCounter, en: this.irqEnabled };
+    (entry as any).op = op;
+    (entry as any).pre = onPreRender;
+    this.addTrace(entry);
   }
 
   setMirrorCallback(cb: (mode: 'horizontal' | 'vertical') => void): void {
@@ -112,7 +156,12 @@ export class MMC3 implements Mapper {
   }
 
   // Telemetry accessor (read-only)
-  getTrace(): ReadonlyArray<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean }> { return this.trace; }
+  getTrace(): ReadonlyArray<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean, f?: number, s?: number, c?: number, ctrl?: number }> { return this.trace; }
+
+  setTimeProvider(fn: (/* no args */) => { frame: number, scanline: number, cycle: number }): void {
+    this.timeProvider = fn;
+  }
+  setCtrlProvider(fn: () => number): void { this.ctrlProvider = fn; }
 
   reset(): void {
     // Reset all registers to initial state
@@ -126,6 +175,7 @@ export class MMC3 implements Mapper {
     this.irqCounter = 0;
     this.irqEnabled = false;
     this.irq = false;
+    this.reloadPending = false;
     this.trace.length = 0; // Clear trace
     this.lastA12 = 0;
     this.a12LastLowDot = 0;

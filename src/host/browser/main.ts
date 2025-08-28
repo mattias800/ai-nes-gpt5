@@ -18,6 +18,7 @@ let sys: NESSystem | null = null
 let running = false
 let audioCtx: AudioContext | null = null
 let workletNode: AudioWorkletNode | null = null
+let gainNode: GainNode | null = null
 let audioPump: number | null = null
 
 // Audio sample generator state
@@ -30,7 +31,9 @@ async function setupAudio() {
   audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)()
   await audioCtx.audioWorklet.addModule(new URL('./nes-worklet.js', import.meta.url))
   workletNode = new AudioWorkletNode(audioCtx, 'nes-processor')
-  workletNode.connect(audioCtx.destination)
+  gainNode = new GainNode(audioCtx, { gain: 0.25 })
+  workletNode.connect(gainNode)
+  gainNode.connect(audioCtx.destination)
 }
 
 function generateSamples(frames: number, sampleRate: number): Float32Array {

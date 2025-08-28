@@ -27,6 +27,9 @@ out/
 
 # ROMs & large binaries (keep out of git; fetched via scripts)
 roms/
+# allow tracked test-roms submodule under roms
+!roms/nes-test-roms
+!roms/nes-test-roms/
 *.nes
 *.bin
 *.rom

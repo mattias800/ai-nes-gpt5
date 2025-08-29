@@ -8,6 +8,7 @@
     "test": "cross-env PPU_TIMING_DEFAULT=vt vitest run --coverage",
     "test:fast": "cross-env PPU_TIMING_DEFAULT=vt vitest run --config vitest.fast.config.ts",
     "test:slow": "cross-env SMB3_BASELINE_CRC= SMB3_DEEP_BASELINE_CRC= PPU_TIMING_DEFAULT=vt vitest run tests/slow/**/*.test.ts",
+    "test:blargg": "cross-env PPU_TIMING_DEFAULT=vt vitest run --config vitest.slow.config.ts",
     "verify": "npm run test:fast && npm run test:slow",
     "dev": "vite",
     "build:host": "vite build",
@@ -28,7 +29,8 @@
     "accuracy:report": "node scripts/accuracy-report.mjs",
     "nestest:trace": "tsx -r tsconfig-paths/register scripts/run-nestest-trace.ts",
     "nestest:diff": "mkdir -p out && npm run nestest:trace -- --max=${NESTEST_MAX:-0} > out/nestest.trace && diff -u roms/nestest.log out/nestest.trace || true",
-    "nestest:compare": "tsx -r tsconfig-paths/register scripts/compare-nestest.ts"
+    "nestest:compare": "tsx -r tsconfig-paths/register scripts/compare-nestest.ts",
+    "dump:wav": "tsx -r tsconfig-paths/register scripts/dump-wav.ts"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",

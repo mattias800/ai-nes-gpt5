@@ -415,17 +415,73 @@ export class CPU6502 {
       // Shifts/rotates (memory variants)
       case 0x06: { const { addr } = this.adrZP(); let v = this.read(addr!); const c = (v & 0x80) !== 0; v = (v << 1) & 0xff; this.write(addr!, v); this.setFlag(C, c); this.setZN(v); base += 5; break; } // ASL zp
       
-      // --- Unofficial stores involving address-high+1 masking (approximations) ---
-      // SHY (0x9C) abs,X: store (Y & (high(addr)+1))
-      case 0x9C: { const { addr, crossed } = this.adrABSX(); const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.y & high; this.write(addr!, val); base += 5; break; }
-      // SHX (0x9E) abs,Y: store (X & (high(addr)+1))
-      case 0x9E: { const { addr, crossed } = this.adrABSY(); const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.x & high; this.write(addr!, val); base += 5; break; }
-      // TAS/SHS (0x9B) abs,Y: S = A & X; store (S & (high(addr)+1))
-      case 0x9B: { const { addr, crossed } = this.adrABSY(); s.s = s.a & s.x; const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.s & high; this.write(addr!, val); base += 5; break; }
-      // AHX/SHA (0x9F) abs,Y: store (A & X & (high(addr)+1))
-      case 0x9F: { const { addr, crossed } = this.adrABSY(); const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.a & s.x & high; this.write(addr!, val); base += 5; break; }
-      // AHX/SHA (0x93) (zp),Y: store (A & X & (high(addr)+1))
-      case 0x93: { const { addr, crossed } = this.adrINDY(); const high = (((addr! >> 8) & 0xFF) + 1) & 0xFF; const val = s.a & s.x & high; this.write(addr!, val); base += 6; break; }
+      // --- Unofficial stores involving address-high+1 masking (mask from BASE high byte, not effective) ---
+      // SHY/SYA (0x9C) abs,X: store (Y & (high(base)+1)); address uses base page (ignore carry)
+      case 0x9C: {
+        const baseAddr = this.fetch16();
+        const lo = (baseAddr & 0xFF);
+        const hi = (baseAddr >>> 8) & 0xFF;
+        const effLo = (lo + s.x) & 0xFF; // ignore carry into high
+        const addr = ((hi << 8) | effLo) & 0xFFFF;
+        const highMask = ((hi + 1) & 0xFF);
+        const val = s.y & highMask;
+        this.write(addr, val);
+        base += 5;
+        break;
+      }
+      // SHX/SXA (0x9E) abs,Y: store (X & (high(base)+1)); address uses base page (ignore carry)
+      case 0x9E: {
+        const baseAddr = this.fetch16();
+        const lo = (baseAddr & 0xFF);
+        const hi = (baseAddr >>> 8) & 0xFF;
+        const effLo = (lo + s.y) & 0xFF; // ignore carry into high
+        const addr = ((hi << 8) | effLo) & 0xFFFF;
+        const highMask = ((hi + 1) & 0xFF);
+        const val = s.x & highMask;
+        this.write(addr, val);
+        base += 5;
+        break;
+      }
+      // TAS/SHS (0x9B) abs,Y: S = A & X; store (S & (high(base)+1)); address uses base page (ignore carry)
+      case 0x9B: {
+        const baseAddr = this.fetch16();
+        const lo = (baseAddr & 0xFF);
+        const hi = (baseAddr >>> 8) & 0xFF;
+        const effLo = (lo + s.y) & 0xFF; // ignore carry into high
+        const addr = ((hi << 8) | effLo) & 0xFFFF;
+        s.s = s.a & s.x;
+        const highMask = ((hi + 1) & 0xFF);
+        const val = s.s & highMask;
+        this.write(addr, val);
+        base += 5;
+        break;
+      }
+      // AHX/SHA (0x9F) abs,Y: store (A & X & (high(base)+1)); address uses base page (ignore carry)
+      case 0x9F: {
+        const baseAddr = this.fetch16();
+        const lo = (baseAddr & 0xFF);
+        const hi = (baseAddr >>> 8) & 0xFF;
+        const effLo = (lo + s.y) & 0xFF; // ignore carry into high
+        const addr = ((hi << 8) | effLo) & 0xFFFF;
+        const highMask = ((hi + 1) & 0xFF);
+        const val = s.a & s.x & highMask;
+        this.write(addr, val);
+        base += 5;
+        break;
+      }
+      // AHX/SHA (0x93) (zp),Y: store (A & X & (high(base)+1)) at base+Y
+      case 0x93: {
+        const zp = this.fetch8();
+        const lo = this.read(zp);
+        const hi = this.read((zp + 1) & 0xFF);
+        const basePtr = lo | (hi << 8);
+        const addr = (basePtr + s.y) & 0xFFFF;
+        const high = (((basePtr >> 8) & 0xFF) + 1) & 0xFF;
+        const val = s.a & s.x & high;
+        this.write(addr, val);
+        base += 6;
+        break;
+      }
       case 0x16: { const { addr } = this.adrZPX(); let v = this.read(addr!); const c = (v & 0x80) !== 0; v = (v << 1) & 0xff; this.write(addr!, v); this.setFlag(C, c); this.setZN(v); base += 6; break; } // ASL zp,X
       case 0x0E: { const { addr } = this.adrABS(); let v = this.read(addr!); const c = (v & 0x80) !== 0; v = (v << 1) & 0xff; this.write(addr!, v); this.setFlag(C, c); this.setZN(v); base += 6; break; } // ASL abs
       case 0x1E: { const { addr } = this.adrABSX(); let v = this.read(addr!); const c = (v & 0x80) !== 0; v = (v << 1) & 0xff; this.write(addr!, v); this.setFlag(C, c); this.setZN(v); base += 7; break; } // ASL abs,X
@@ -494,8 +550,8 @@ export class CPU6502 {
       // BIT
       case 0x24: { const { addr } = this.adrZP(); const v = this.read(addr!); this.setFlag(Z, (s.a & v) === 0); this.setFlag(V, (v & 0x40) !== 0); this.setFlag(N, (v & 0x80) !== 0); base += 3; break; }
       case 0x2C: { const { addr } = this.adrABS(); const v = this.read(addr!); this.setFlag(Z, (s.a & v) === 0); this.setFlag(V, (v & 0x40) !== 0); this.setFlag(N, (v & 0x80) !== 0); base += 4; break; }
-      // Unofficial: BIT #imm (0x89) sets Z like BIT; N,V unaffected
-      case 0x89: { const { value } = this.adrIMM(); const v = value!; this.setFlag(Z, (s.a & v) === 0); base += 2; break; }
+      // DOP/NOP #imm (0x89): fetch and ignore immediate; flags unchanged
+      case 0x89: { this.fetch8(); base += 2; break; }
       // CMP/CPX/CPY
       case 0xC9: { const { value } = this.adrIMM(); this.cmp(s.a, value!); base += 2; break; }
       case 0xC5: { const { addr } = this.adrZP(); this.cmp(s.a, this.read(addr!)); base += 3; break; }
@@ -551,8 +607,9 @@ export class CPU6502 {
       case 0x60: { const addr = (this.pop16() + 1) & 0xffff; s.pc = addr; base += 6; break; } // RTS
       // BRK/RTI (basic)
       case 0x00: { // BRK
-        s.pc = (s.pc + 1) & 0xffff; // increment by one (emulated quirk)
-        this.push16((s.pc - 1) & 0xffff);
+        // BRK consumes a padding byte and pushes return address = PC+2
+        s.pc = (s.pc + 1) & 0xffff; // skip padding byte
+        this.push16(s.pc & 0xffff); // push PC+2
         this.push8((s.p | B | U) & 0xff);
         this.setFlag(I, true);
         const vec = this.read16(0xfffe);

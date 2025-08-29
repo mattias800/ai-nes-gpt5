@@ -62,6 +62,7 @@ export class NESSystem {
     this.cpu.reset(vec);
     this.ppu.reset();
     this.cart.reset();
+    this.apu.reset();
   }
 
   // Perform a CPU-only reset, preserving PPU and mapper state (closer to warm reset semantics)

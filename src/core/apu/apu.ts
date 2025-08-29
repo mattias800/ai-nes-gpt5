@@ -42,6 +42,7 @@ export class APU {
   private pulse2SweepShift = 0;
   private pulse2SweepDivider = 0;
   private pulse2SweepReload = false;
+  private pulse2SweepMute = false;
 
   // Pulse1 timer/sequencer
   private pulse1TimerPeriod = 0; // 11-bit
@@ -55,6 +56,7 @@ export class APU {
   private pulse1SweepShift = 0;
   private pulse1SweepDivider = 0;
   private pulse1SweepReload = false;
+  private pulse1SweepMute = false;
 
   // Triangle channel (linear counter + length + timer/sequencer)
   private triLinear = 0;
@@ -560,7 +562,7 @@ export class APU {
   private pulse2Enabled(): boolean { return (this.enableMask & 0x02) !== 0; }
 
   private clockSweeps() {
-    // Helper to compute and apply sweep for a channel
+    // Helper to compute and apply sweep for a channel and derive mute state
     const applySweep = (
       timerPeriod: number,
       sweepEnable: boolean,
@@ -568,22 +570,37 @@ export class APU {
       sweepNegate: boolean,
       sweepShift: number,
       isPulse1: boolean
-    ): number => {
-      if (!sweepEnable || sweepShift === 0) return timerPeriod;
-      if (timerPeriod < 8) return timerPeriod; // too high pitch, no update
-      const delta = (timerPeriod >> sweepShift) & 0x7FF;
-      let target = sweepNegate ? (timerPeriod - delta - (isPulse1 ? 1 : 0)) : (timerPeriod + delta);
-      if (target < 0) target = 0;
-      if (target > 0x7FF) return timerPeriod; // invalid, do not apply
-      return target & 0x7FF;
+    ): { newPeriod: number; mute: boolean } => {
+      const canCalc = sweepEnable && (sweepShift & 0x07) !== 0;
+      let mute = false;
+      let newPeriod = timerPeriod & 0x7FF;
+      if (canCalc) {
+        if (timerPeriod >= 8) {
+          const delta = (timerPeriod >> (sweepShift & 0x07)) & 0x7FF;
+          let target = sweepNegate ? (timerPeriod - delta - (isPulse1 ? 1 : 0)) : (timerPeriod + delta);
+          if (target < 0) target = 0;
+          if (target > 0x7FF || target < 8) {
+            mute = true; // overflow or too-high pitch target mutes channel
+          } else {
+            newPeriod = target & 0x7FF;
+          }
+        } else {
+          // Current period already too high pitch; treat as muted for mixing
+          mute = true;
+        }
+      } else {
+        // Sweep disabled or shift==0 -> do not force mute
+        mute = false;
+      }
+      return { newPeriod, mute };
     };
 
     // Pulse1 sweep divider
     if (this.pulse1SweepReload) {
-      this.pulse1SweepDivider = this.pulse1SweepPeriod;
+      this.pulse1SweepDivider = this.pulse1SweepPeriod & 0x07;
       this.pulse1SweepReload = false;
     } else if (this.pulse1SweepDivider === 0) {
-      const newPeriod = applySweep(
+      const res = applySweep(
         this.pulse1TimerPeriod,
         this.pulse1SweepEnable,
         this.pulse1SweepPeriod,
@@ -591,18 +608,19 @@ export class APU {
         this.pulse1SweepShift,
         true
       );
-      this.pulse1TimerPeriod = newPeriod;
-      this.pulse1SweepDivider = this.pulse1SweepPeriod;
+      this.pulse1TimerPeriod = res.newPeriod;
+      this.pulse1SweepMute = res.mute;
+      this.pulse1SweepDivider = this.pulse1SweepPeriod & 0x07;
     } else {
       this.pulse1SweepDivider = (this.pulse1SweepDivider - 1) & 0x07;
     }
 
     // Pulse2 sweep divider
     if (this.pulse2SweepReload) {
-      this.pulse2SweepDivider = this.pulse2SweepPeriod;
+      this.pulse2SweepDivider = this.pulse2SweepPeriod & 0x07;
       this.pulse2SweepReload = false;
     } else if (this.pulse2SweepDivider === 0) {
-      const newPeriod = applySweep(
+      const res = applySweep(
         this.pulse2TimerPeriod,
         this.pulse2SweepEnable,
         this.pulse2SweepPeriod,
@@ -610,11 +628,16 @@ export class APU {
         this.pulse2SweepShift,
         false
       );
-      this.pulse2TimerPeriod = newPeriod;
-      this.pulse2SweepDivider = this.pulse2SweepPeriod;
+      this.pulse2TimerPeriod = res.newPeriod;
+      this.pulse2SweepMute = res.mute;
+      this.pulse2SweepDivider = this.pulse2SweepPeriod & 0x07;
     } else {
       this.pulse2SweepDivider = (this.pulse2SweepDivider - 1) & 0x07;
     }
+
+    // If sweep disabled or shift==0, ensure mute is cleared (hardware silencing only applies when calculation is active)
+    if (!this.pulse1SweepEnable || (this.pulse1SweepShift & 0x07) === 0) this.pulse1SweepMute = false;
+    if (!this.pulse2SweepEnable || (this.pulse2SweepShift & 0x07) === 0) this.pulse2SweepMute = false;
   }
 
   private clockPulse1Timer() {
@@ -636,7 +659,7 @@ export class APU {
   }
 
   private pulse1Output(): number {
-    if (!this.pulse1Enabled() || this.pulse1Length === 0 || this.pulse1TimerPeriod <= 7) return 0;
+    if (!this.pulse1Enabled() || this.pulse1Length === 0 || this.pulse1TimerPeriod <= 7 || this.pulse1SweepMute) return 0;
     // Duty sequences (NES): indexed by duty, then phase 0..7
     const DUTY: number[][] = [
       [0,1,0,0,0,0,0,0], // 12.5%
@@ -652,7 +675,7 @@ export class APU {
   }
 
   private pulse2Output(): number {
-    if (!this.pulse2Enabled() || this.pulse2Length === 0 || this.pulse2TimerPeriod <= 7) return 0;
+    if (!this.pulse2Enabled() || this.pulse2Length === 0 || this.pulse2TimerPeriod <= 7 || this.pulse2SweepMute) return 0;
     const DUTY: number[][] = [
       [0,1,0,0,0,0,0,0],
       [0,1,1,0,0,0,0,0],
@@ -680,7 +703,7 @@ export class APU {
     if (!this.noiseEnabled() || this.noiseLength === 0) return 0;
     const bit0 = this.noiseShift & 1;
     const vol = this.noiseEnvConstant ? (this.noiseEnvPeriod & 0x0F) : (this.noiseEnvVolume & 0x0F);
-    return bit0 ? vol : 0;
+    return bit0 ? 0 : vol;
   }
 
   // Return a simple 8-bit mixed sample (0..255). Mix triangle + pulse1 + pulse2 + noise + DMC.
@@ -693,6 +716,10 @@ export class APU {
     // Weighting: triangle*10 + pulses*12 each + noise*8 + dmc scaled to roughly match
     let s = tri * 10 + p1 * 12 + p2 * 12 + noi * 8 + Math.floor(dmc * 1.5);
     if (s > 255) s = 255;
+    // Apply global mixer gain of 50% around midpoint 128 to preserve DC offset across hosts
+    const mid = 128;
+    s = mid + Math.floor((s - mid) * 0.5);
+    if (s < 0) s = 0; else if (s > 255) s = 255;
     return s & 0xFF;
   }
 

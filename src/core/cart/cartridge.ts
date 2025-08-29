@@ -5,6 +5,7 @@ import { UxROM } from './mappers/uxrom';
 import { MMC3 } from './mappers/mmc3';
 import { MMC1 } from './mappers/mmc1';
 import { CNROM } from './mappers/cnrom';
+import { MMC2 } from './mappers/mmc2';
 import type { Mapper } from './types';
 
 export class Cartridge {
@@ -16,6 +17,7 @@ export class Cartridge {
       case 2: this.mapper = new UxROM(rom.prg, rom.chr); break;
       case 3: this.mapper = new CNROM(rom.prg, rom.chr); break;
       case 4: this.mapper = new MMC3(rom.prg, rom.chr); break;
+      case 9: this.mapper = new MMC2(rom.prg, rom.chr); break;
       default:
         throw new Error(`Mapper ${rom.mapper} not implemented`);
     }

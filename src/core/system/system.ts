@@ -13,6 +13,7 @@ export class NESSystem {
   public io: NesIO;
   public cart: Cartridge;
   public apu: APU;
+  private _lastIrqLine = false;
 
   constructor(rom: INesRom) {
     this.bus = new CPUBus();
@@ -52,9 +53,38 @@ export class NESSystem {
     // Attach APU
     this.apu = new APU();
     this.apu.reset();
+    // Optional: allow fractional APU frame timing via env var (for precise CLI latency/IRQ tests)
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const mode = env?.APU_FRAME_TIMING as string | undefined;
+      if (mode && typeof (this.apu as any).setFrameTimingMode === 'function') {
+        const v = mode.toLowerCase();
+        if (v === 'fractional' || v === 'frac' || v === '1') {
+          (this.apu as any).setFrameTimingMode('fractional');
+        } else if (v === 'integer' || v === 'int' || v === '0') {
+          (this.apu as any).setFrameTimingMode('integer');
+        }
+      }
+    } catch {}
     this.io.attachAPU(this.apu);
     // Provide APU with CPU memory read for DMC fetches
     this.apu.setCpuRead((addr) => this.bus.read(addr & 0xFFFF));
+    // Provide CPU cycle getter for APU debug timestamps
+    try { (this.apu as any).setCpuCycleGetter?.(() => this.cpu.state.cycles); } catch {}
+    // Optional: frame phase offset in CPU cycles (may be fractional)
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const offStr = env?.APU_FRAME_PHASE_OFFSET_CYCLES as string | undefined;
+      if (offStr && (this.apu as any).setFramePhaseOffset) {
+        const off = parseFloat(offStr);
+        if (isFinite(off)) (this.apu as any).setFramePhaseOffset(off);
+      }
+      const lagStr = env?.APU_FRAME_IRQ_ASSERT_DELAY as string | undefined;
+      if (lagStr && (this.apu as any).setFrameIrqAssertDelay) {
+        const lag = parseInt(lagStr, 10) | 0;
+        (this.apu as any).setFrameIrqAssertDelay(lag);
+      }
+    } catch {}
   }
 
   reset() {
@@ -63,6 +93,8 @@ export class NESSystem {
     this.ppu.reset();
     this.cart.reset();
     this.apu.reset();
+    // Reinstall CPU read hook for DMC after APU reset cleared it
+    this.apu.setCpuRead((addr) => this.bus.read(addr & 0xFFFF));
   }
 
   // Perform a CPU-only reset, preserving PPU and mapper state (closer to warm reset semantics)
@@ -90,8 +122,35 @@ export class NESSystem {
         if (this.apu && this.apu.dmcIrqPending && this.apu.dmcIrqPending()) irqLine = true;
         if (this.apu && (this.apu as any).frameIrqPending && (this.apu as any).frameIrqPending()) irqLine = true;
       }
+      if (env && env.TRACE_IRQ_LINE === '1') {
+        const cyc = this.cpu.state.cycles;
+        const winStr = env.TRACE_IRQ_LINE_WINDOW as string | undefined;
+        let inWin = true;
+        if (winStr) {
+          const m = /^(\d+)-(\d+)$/.exec(winStr);
+          if (m) {
+            const a = parseInt(m[1], 10) | 0;
+            const b = parseInt(m[2], 10) | 0;
+            inWin = cyc >= a && cyc <= b;
+          }
+        }
+        const changeOnly = env.TRACE_IRQ_LINE_CHANGE_ONLY === '1';
+        if (inWin && (!changeOnly || (irqLine !== this._lastIrqLine))) {
+          const src = {
+            mapper: !!(mapper.irqPending && mapper.irqPending()),
+            apu_frame: !!(this.apu && (this.apu as any).frameIrqPending && (this.apu as any).frameIrqPending()),
+            apu_dmc: !!(this.apu && this.apu.dmcIrqPending && this.apu.dmcIrqPending()),
+            I: (this.cpu.state.p & 0x04) !== 0,
+            cyc,
+            phase: 'pre',
+          };
+          // eslint-disable-next-line no-console
+          console.log(`[irq] ${src.phase} line=${irqLine} I=${src.I} cyc=${src.cyc} mapper=${src.mapper} apu_frame=${src.apu_frame} apu_dmc=${src.apu_dmc}`);
+        }
+      }
     } catch {}
     this.cpu.setIrqLine(irqLine);
+    this._lastIrqLine = irqLine;
 
     // Install per-cycle hook so bus-access cycles are interleaved with PPU/APU
     this.cpu.setCycleHook((cycles: number) => {
@@ -103,6 +162,21 @@ export class NESSystem {
 
     // Execute one CPU instruction; all cycles (bus + internal) will tick PPU/APU via the per-cycle hook.
     this.cpu.step();
+
+    // Apply any APU-induced CPU stalls (e.g., DMC DMA fetches) behind an opt-in env flag
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const enableDmcStalls = !!(env && env.ENABLE_DMC_STALLS === '1');
+      if (enableDmcStalls) {
+        const stall = (this.apu as any)?.consumeDmcStallCycles?.() | 0;
+        if (stall > 0) {
+          this.cpu.addCycles(stall);
+          // Keep PPU/APU in sync during stall
+          this.ppu.tick(stall * 3);
+          this.apu.tick(stall);
+        }
+      }
+    } catch {}
 
     // Deliver NMI if VBlank started during PPU tick
     if (this.ppu.nmiOccurred && this.ppu.nmiOutput) {
@@ -119,7 +193,34 @@ export class NESSystem {
         if (this.apu && this.apu.dmcIrqPending && this.apu.dmcIrqPending()) irqLine = true;
         if (this.apu && (this.apu as any).frameIrqPending && (this.apu as any).frameIrqPending()) irqLine = true;
       }
+      if (env && env.TRACE_IRQ_LINE === '1') {
+        const cyc = this.cpu.state.cycles;
+        const winStr = env.TRACE_IRQ_LINE_WINDOW as string | undefined;
+        let inWin = true;
+        if (winStr) {
+          const m = /^(\d+)-(\d+)$/.exec(winStr);
+          if (m) {
+            const a = parseInt(m[1], 10) | 0;
+            const b = parseInt(m[2], 10) | 0;
+            inWin = cyc >= a && cyc <= b;
+          }
+        }
+        const changeOnly = env.TRACE_IRQ_LINE_CHANGE_ONLY === '1';
+        if (inWin && (!changeOnly || (irqLine !== this._lastIrqLine))) {
+          const src = {
+            mapper: !!(mapper.irqPending && mapper.irqPending()),
+            apu_frame: !!(this.apu && (this.apu as any).frameIrqPending && (this.apu as any).frameIrqPending()),
+            apu_dmc: !!(this.apu && this.apu.dmcIrqPending && this.apu.dmcIrqPending()),
+            I: (this.cpu.state.p & 0x04) !== 0,
+            cyc,
+            phase: 'post',
+          };
+          // eslint-disable-next-line no-console
+          console.log(`[irq] ${src.phase} line=${irqLine} I=${src.I} cyc=${src.cyc} mapper=${src.mapper} apu_frame=${src.apu_frame} apu_dmc=${src.apu_dmc}`);
+        }
+      }
     } catch {}
     this.cpu.setIrqLine(irqLine);
+    this._lastIrqLine = irqLine;
   }
 }

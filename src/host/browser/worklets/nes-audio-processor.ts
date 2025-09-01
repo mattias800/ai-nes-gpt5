@@ -13,16 +13,42 @@ const H = {
 };
 
 class NesAudioProcessor extends AudioWorkletProcessor {
-  constructor(options) {
+  private _control: Int32Array;
+  private _data: Float32Array;
+  private _capacity: number;
+  private _ringChannels: number;
+
+  // Telemetry
+  private _statsEnabled: boolean;
+  private _occMin: number;
+  private _occMax: number;
+  private _occSum: number;
+  private _occCount: number;
+  private _lastPost: number;
+
+  constructor(options: { processorOptions?: { controlSAB: SharedArrayBuffer, dataSAB: SharedArrayBuffer } }) {
     super();
-    const sab = options?.processorOptions || {};
+    const sab = options?.processorOptions || {} as { controlSAB: SharedArrayBuffer, dataSAB: SharedArrayBuffer };
     this._control = new Int32Array(sab.controlSAB);
     this._data = new Float32Array(sab.dataSAB);
     this._capacity = this._control[H.Capacity] | 0;
     this._ringChannels = this._control[H.Channels] | 0; // 1 or 2
+
+    this._statsEnabled = false;
+    this._occMin = Number.POSITIVE_INFINITY;
+    this._occMax = 0;
+    this._occSum = 0;
+    this._occCount = 0;
+    this._lastPost = currentTime;
+
+    // Allow enabling via message from main
+    this.port.onmessage = (ev: MessageEvent) => {
+      const d: any = ev.data;
+      if (d && d.type === 'enable-stats') this._statsEnabled = !!d.value;
+    };
   }
 
-  process = (inputs, outputs) => {
+  process = (inputs: Float32Array[][], outputs: Float32Array[][]): boolean => {
     const out = outputs[0]; // array of channels
     const frames = out[0].length | 0;
     const channelsOut = out.length | 0;
@@ -60,6 +86,20 @@ class NesAudioProcessor extends AudioWorkletProcessor {
     const newR = readIdx | 0;
     const newOcc = ((Atomics.load(this._control, H.WriteIdx) | 0 - newR + this._capacity) % this._capacity) | 0;
     Atomics.store(this._control, H.LastOccupancy, newOcc);
+
+    // Telemetry: track occupancy and post periodically
+    if (this._statsEnabled) {
+      this._occMin = Math.min(this._occMin, occ);
+      this._occMax = Math.max(this._occMax, occ);
+      this._occSum += occ; this._occCount++;
+      if ((currentTime - this._lastPost) > 0.5) {
+        const underruns = Atomics.load(this._control, H.Underruns) | 0;
+        const occAvg = this._occCount > 0 ? (this._occSum / this._occCount) : 0;
+        this.port.postMessage({ type: 'worklet-stats', underruns, occMin: this._occMin, occAvg, occMax: this._occMax, sampleRate });
+        this._lastPost = currentTime;
+        this._occMin = Number.POSITIVE_INFINITY; this._occMax = 0; this._occSum = 0; this._occCount = 0;
+      }
+    }
 
     return true;
   }

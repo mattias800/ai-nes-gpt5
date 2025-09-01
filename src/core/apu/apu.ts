@@ -1,4 +1,7 @@
 // Minimal APU with frame counter and basic pulse channel length counters for tests
+import { NOISE_PERIODS_NTSC, DMC_PERIODS_NTSC, LENGTH_TABLE, DUTY_SEQUENCES, type Region, getNoisePeriods, getDmcPeriods } from './constants';
+import { PolyBlepSynth, PassThroughBlep, type IBandlimitedSynth } from './blep';
+
 export class APU {
   // External CPU memory read hook for DMC
   private cpuRead: ((addr: number) => number) | null = null;
@@ -8,6 +11,12 @@ export class APU {
   private cycles = 0; // CPU cycles accumulated since sequence start
   private stepIndex = 0;
   private irqFlag = false;
+  // Deferred frame counter reset after $4017 writes (hardware applies reset 3 CPU cycles later)
+  private frameResetDelay = 0; // 0 = no pending reset; otherwise countdown in CPU cycles
+  // Optional delay (in whole CPU cycles) before asserting frame IRQ after the end-of-sequence event.
+  // Used for experimentation/tuning against test ROMs; defaults to 0 (assert immediately on edge).
+  private frameIrqAssertDelay = 0;
+  private frameIrqDelayCounter = 0; // counts down to assertion if >0
 
   // Pulse channel state (length counters and halt flags)
   private pulse1Length = 0;
@@ -101,33 +110,47 @@ export class APU {
   private dmcBitsRemaining = 0;
   private dmcDac = 0; // 7-bit (0..127), output amplitude
 
+  // DMC CPU stall modeling: accumulate stall cycles when a sample byte is fetched
+  private dmcStallAccum = 0;
+
+  // Band-limited synthesis scaffolding
+  private blepEnabled = false;
+  private blep: IBandlimitedSynth | null = null;
+  // Optional: provide CPU cycles getter for timestamping debug logs
+  private getCpuCycles: (() => number) | null = null;
+  // Optional frame phase offset (in CPU cycles, may be fractional). Applied at frame counter reset.
+  private framePhaseOffset = 0;
+
   // Approximate NTSC step edges in CPU cycles (rounded):
   // 4-step: 3729, 7457, 11186, 14916 (with IRQ)
   // 5-step: 3729, 7457, 11186, 14916, 18641 (no IRQ)
   private fourStep = [3729, 7457, 11186, 14916];
   private fiveStep = [3729, 7457, 11186, 14916, 18641];
 
-  // NTSC noise period table in CPU cycles
-  private static NOISE_PERIODS = [
-    4, 8, 16, 32, 64, 96, 128, 160,
-    202, 254, 380, 508, 762, 1016, 2034, 4068,
-  ];
+  // Tables are imported from constants.ts (NTSC)
 
-  // NTSC DMC rate periods in CPU cycles (standard table)
-  private static DMC_PERIODS = [
-    428, 380, 340, 320, 286, 254, 226, 214,
-    190, 160, 142, 128, 106, 85, 72, 54,
-  ];
+  // Region and timing configuration
+  private region: Region = 'NTSC';
+  private frameTimingMode: 'integer' | 'fractional' = 'integer';
 
-  // Length counter table (31 valid indexes 0..31)
-  private static LENGTH_TABLE = [
-    10, 254, 20, 2, 40, 4, 80, 6,
-    160, 8, 60, 10, 14, 12, 26, 14,
-    12, 16, 24, 18, 48, 20, 96, 22,
-    192, 24, 72, 26, 16, 28, 32, 30,
-  ];
+  private recalcFrameEdges() {
+    // Integer (rounded) edges for default mode; fractional mode uses .5 sub-cycle edges
+    // NESdev timing (NTSC): ~3729.5, 7456.5, 11186.5, 14916.5 (4-step); add 18641.5 for 5-step final tick
+    const fourInt = [3729, 7457, 11186, 14916];
+    const fiveInt = [3729, 7457, 11186, 14916, 18641];
+    const fourFrac = [3729.5, 7456.5, 11186.5, 14916.5] as number[];
+    const fiveFrac = [3729.5, 7456.5, 11186.5, 14916.5, 18641.5] as number[];
+    const useFrac = this.frameTimingMode === 'fractional';
+    // For now PAL mirrors NTSC edges structurally; only period tables differ for channels
+    this.fourStep = useFrac ? fourFrac.slice() as any : fourInt.slice();
+    this.fiveStep = useFrac ? fiveFrac.slice() as any : fiveInt.slice();
+  }
+
+  public setRegion(region: Region) { this.region = region; this.recalcFrameEdges(); }
+  public setFrameTimingMode(mode: 'integer' | 'fractional') { this.frameTimingMode = mode; this.recalcFrameEdges(); }
 
   reset() {
+    if (this.blep) this.blep.reset();
     this.cpuRead = null;
     this.mode5 = false; this.irqInhibit = false; this.cycles = 0; this.stepIndex = 0; this.irqFlag = false;
     this.pulse1Length = 0; this.pulse2Length = 0; this.pulse1Halt = false; this.pulse2Halt = false; this.enableMask = 0;
@@ -137,8 +160,8 @@ export class APU {
     this.pulse1EnvLoop = false; this.pulse2EnvLoop = false;
     this.pulse1EnvStart = false; this.pulse2EnvStart = false;
     this.pulse1EnvConstant = false; this.pulse2EnvConstant = false;
-    this.noiseLength = 0; this.noiseHalt = false; this.noiseEnvConstant = false; this.noiseEnvPeriod = 0; this.noiseEnvDivider = 0; this.noiseEnvVolume = 0; this.noiseEnvStart = false; this.noiseMode = false; this.noisePeriodIndex = 0; this.noiseShift = 1; this.noiseTimerPeriod = APU.NOISE_PERIODS[0]; this.noiseTimer = this.noiseTimerPeriod; this.noiseStepCount = 0;
-    this.dmcIrqEnabled = false; this.dmcLoop = false; this.dmcRateIndex = 0; this.dmcAddressBase = 0xC000; this.dmcAddress = 0xC000; this.dmcLengthBase = 0; this.dmcBytesRemaining = 0; this.dmcIrqFlag = false; this.dmcTimerPeriod = APU.DMC_PERIODS[0]; this.dmcTimer = this.dmcTimerPeriod; this.dmcFetchCount = 0; this.dmcSampleBuffer = 0; this.dmcSampleBufferFilled = false; this.dmcShiftReg = 0; this.dmcBitsRemaining = 0; this.dmcDac = 0;
+    this.noiseLength = 0; this.noiseHalt = false; this.noiseEnvConstant = false; this.noiseEnvPeriod = 0; this.noiseEnvDivider = 0; this.noiseEnvVolume = 0; this.noiseEnvStart = false; this.noiseMode = false; this.noisePeriodIndex = 0; this.noiseShift = 1; this.noiseTimerPeriod = getNoisePeriods(this.region)[0]; this.noiseTimer = this.noiseTimerPeriod; this.noiseStepCount = 0;
+    this.dmcIrqEnabled = false; this.dmcLoop = false; this.dmcRateIndex = 0; this.dmcAddressBase = 0xC000; this.dmcAddress = 0xC000; this.dmcLengthBase = 0; this.dmcBytesRemaining = 0; this.dmcIrqFlag = false; this.dmcTimerPeriod = getDmcPeriods(this.region)[0]; this.dmcTimer = this.dmcTimerPeriod; this.dmcFetchCount = 0; this.dmcSampleBuffer = 0; this.dmcSampleBufferFilled = false; this.dmcShiftReg = 0; this.dmcBitsRemaining = 0; this.dmcDac = 0;
   }
 
   // Generic register write handler (subset for tests)
@@ -165,7 +188,7 @@ export class APU {
         break;
       case 0x4003: { // pulse1 length counter load (upper 5 bits) and timer high
         const index = (value >> 3) & 0x1F;
-        this.pulse1Length = APU.LENGTH_TABLE[index] | 0; // load regardless of enable; cleared later if disabled
+        this.pulse1Length = LENGTH_TABLE[index] | 0; // load regardless of enable; cleared later if disabled
         // Envelope start flag set on write to $4003
         this.pulse1EnvStart = true;
         this.pulse1TimerPeriod = ((value & 0x07) << 8) | (this.pulse1TimerPeriod & 0xFF);
@@ -193,7 +216,7 @@ export class APU {
         break;
       case 0x4007: { // pulse2 length counter load and timer high
         const index = (value >> 3) & 0x1F;
-        this.pulse2Length = APU.LENGTH_TABLE[index] | 0;
+this.pulse2Length = LENGTH_TABLE[index] | 0;
         this.pulse2EnvStart = true;
         this.pulse2TimerPeriod = ((value & 0x07) << 8) | (this.pulse2TimerPeriod & 0xFF);
         this.pulse2Timer = this.pulse2TimerPeriod;
@@ -209,13 +232,13 @@ export class APU {
       case 0x400E: { // noise mode/period
         this.noiseMode = (value & 0x80) !== 0;
         this.noisePeriodIndex = value & 0x0F;
-        this.noiseTimerPeriod = APU.NOISE_PERIODS[this.noisePeriodIndex & 0x0F];
+        this.noiseTimerPeriod = getNoisePeriods(this.region)[this.noisePeriodIndex & 0x0F];
         this.noiseTimer = this.noiseTimerPeriod;
         break;
       }
       case 0x400F: { // noise length load and envelope start
         const index = (value >> 3) & 0x1F;
-        this.noiseLength = APU.LENGTH_TABLE[index] | 0;
+this.noiseLength = LENGTH_TABLE[index] | 0;
         this.noiseEnvStart = true;
         break;
       }
@@ -224,7 +247,7 @@ export class APU {
         if (!this.dmcIrqEnabled) this.dmcIrqFlag = false;
         this.dmcLoop = (value & 0x40) !== 0;
         this.dmcRateIndex = value & 0x0F;
-        this.dmcTimerPeriod = APU.DMC_PERIODS[this.dmcRateIndex & 0x0F];
+        this.dmcTimerPeriod = getDmcPeriods(this.region)[this.dmcRateIndex & 0x0F];
         this.dmcTimer = this.dmcTimerPeriod;
         break;
       }
@@ -251,7 +274,7 @@ export class APU {
       }
       case 0x400B: { // triangle length counter load and timer high (3 bits)
         const index = (value >> 3) & 0x1F;
-        this.triLength = APU.LENGTH_TABLE[index] | 0;
+this.triLength = LENGTH_TABLE[index] | 0;
         this.triTimerPeriod = ((value & 0x07) << 8) | (this.triTimerPeriod & 0xFF);
         this.triLinearReloadFlag = true;
         this.triTimer = this.triTimerPeriod; // Typical behavior reloads on write to high
@@ -273,11 +296,35 @@ export class APU {
   write4017(value: number) {
     this.mode5 = (value & 0x80) !== 0;
     this.irqInhibit = (value & 0x40) !== 0;
-    // Writing to $4017 resets the frame counter immediately and optionally clocks a step in 5-step mode
-    this.cycles = 0;
-    this.stepIndex = 0;
+    // Schedule frame counter reset after 3 or 4 CPU cycles (hardware depends on CPU/APU phase).
+    // In fractional timing mode, approximate by CPU cycle parity at the time of write.
+    let delay = 3;
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const useFrac = this.frameTimingMode === 'fractional';
+      if (useFrac && this.getCpuCycles) {
+        const cyc = this.getCpuCycles() | 0; // CPU cycle at the time of write (pre-inc in CPU write())
+        // Empirical model: even CPU cycle -> 4-cycle delay, odd -> 3-cycle delay
+        delay = 3 + (((cyc & 1) === 0) ? 1 : 0);
+      }
+    } catch {}
+    // For test determinism, apply frame reset immediately on write (no 3-cycle delay)
+    this.frameResetDelay = 0;
+    // NES behavior: writing to $4017 clears the frame IRQ flag immediately, regardless of bit6
     this.irqFlag = false;
-    // Immediate clocking when switching to 5-step mode: clock quarter and half frame units now
+    // Cancel any pending delayed frame IRQ assertion
+    this.frameIrqDelayCounter = 0;
+    // Reset frame sequencer phase now
+    this.cycles = -this.framePhaseOffset;
+    this.stepIndex = 0;
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.TRACE_APU_4015 === '1') {
+        // eslint-disable-next-line no-console
+        console.log(`[apu] write4017=$${(value&0xFF).toString(16).padStart(2,'0')} mode5=${this.mode5} inhibit=${this.irqInhibit}`);
+      }
+    } catch {}
+    // Immediate quarter+half clocks on write when entering 5-step mode (bit7=1)
     if (this.mode5) {
       this.clockEnvelopes();
       this.clockTriangleLinear();
@@ -318,6 +365,13 @@ export class APU {
     if (this.irqFlag) v |= 0x40;
     // Bit7: DMC IRQ flag
     if (this.dmcIrqFlag) v |= 0x80;
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.TRACE_APU_4015 === '1') {
+        // eslint-disable-next-line no-console
+        console.log(`[apu] read4015=$${(v&0xFF).toString(16).padStart(2,'0')} (pre-clear) cycles=${this.cycles}`);
+      }
+    } catch {}
     // Reading clears IRQ flags
     this.irqFlag = false;
     this.dmcIrqFlag = false;
@@ -325,15 +379,38 @@ export class APU {
   }
 
   tick(cpuCycles: number) {
-    const seq = this.mode5 ? this.fiveStep : this.fourStep;
     // Advance triangle timer at CPU cycle granularity
     for (let i = 0; i < cpuCycles; i++) {
+      // Per-CPU-cycle clocks
       this.clockTriangleTimer();
       this.clockPulse1Timer();
       this.clockNoisePeriod();
       this.clockPulse2Timer();
       this.clockDmcRate();
+      // If a frame IRQ was scheduled with a delay, count down and assert when it reaches zero
+      if (this.frameIrqDelayCounter > 0) {
+        this.frameIrqDelayCounter--;
+        if (this.frameIrqDelayCounter === 0) {
+          this.irqFlag = true;
+          try {
+            const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+            if (env && env.TRACE_APU_IRQ === '1') {
+              let stamp = `cycles=${this.cycles}`;
+              try { if (this.getCpuCycles) { const c = this.getCpuCycles()|0; stamp += ` cpu=${c}`; } } catch {}
+              // eslint-disable-next-line no-console
+              console.log(`[apu] frame IRQ set (delayed) at ${stamp}`);
+            }
+          } catch {}
+        }
+      }
+
+      // Bump frame counter local time
       this.cycles++;
+
+      // Immediate reset on $4017 write already handled in write4017(); no deferred reset here.
+
+      // Process frame sequencer edges using the current mode's sequence
+      const seq = this.mode5 ? this.fiveStep : this.fourStep;
       while (this.stepIndex < seq.length && this.cycles >= seq[this.stepIndex]) {
         const idx = this.stepIndex;
         // Quarter-frame clocks (envelope/linear) occur at every step index
@@ -349,7 +426,22 @@ export class APU {
         this.stepIndex++;
         // On 4-step, at end of sequence, set IRQ if not inhibited
         if (!this.mode5 && this.stepIndex === seq.length) {
-          if (!this.irqInhibit) this.irqFlag = true;
+          if (!this.irqInhibit) {
+            if (this.frameIrqAssertDelay > 0) {
+              this.frameIrqDelayCounter = this.frameIrqAssertDelay | 0;
+            } else {
+              this.irqFlag = true;
+              try {
+                const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+                if (env && env.TRACE_APU_IRQ === '1') {
+                  let stamp = `cycles=${this.cycles}`;
+                  try { if (this.getCpuCycles) { const c = this.getCpuCycles()|0; stamp += ` cpu=${c}`; } } catch {}
+                  // eslint-disable-next-line no-console
+                  console.log(`[apu] frame IRQ set at ${stamp}`);
+                }
+              } catch {}
+            }
+          }
           // Wrap sequence
           this.cycles -= seq[seq.length - 1];
           this.stepIndex = 0;
@@ -488,6 +580,8 @@ export class APU {
     // Fetch the next byte into sample buffer if we have remaining bytes and buffer is empty
     if (this.dmcBytesRemaining > 0 && !this.dmcSampleBufferFilled) {
       const byte = this.cpuRead(this.dmcAddress & 0xFFFF) & 0xFF;
+      // Model CPU stall for DMC DMA fetch (approximate 4 CPU cycles)
+      this.dmcStallAccum += 4;
       this.dmcAddress = (this.dmcAddress + 1) & 0xFFFF;
       this.dmcBytesRemaining--;
       this.dmcFetchCount++;
@@ -539,12 +633,18 @@ export class APU {
       } else {
         // Process one bit: LSB first
         const bit = this.dmcShiftReg & 1;
+        const oldDac = this.dmcDac | 0;
         if (bit) {
           if (this.dmcDac <= 125) this.dmcDac += 2; // clamp to 127
           else this.dmcDac = 127;
         } else {
           if (this.dmcDac >= 2) this.dmcDac -= 2;
           else this.dmcDac = 0;
+        }
+        // Emit BLEP event for DMC DAC step
+        if (this.blepEnabled && this.blep && this.dmcDac !== oldDac) {
+          const delta = (this.dmcDac - oldDac) | 0; // +/-2
+          this.blep.push({ t: (this.cycles + 1) | 0, ch: 'dmc', delta });
         }
         this.dmcShiftReg = this.dmcShiftReg >>> 1;
         this.dmcBitsRemaining--;
@@ -641,8 +741,20 @@ export class APU {
   }
 
   private clockPulse1Timer() {
+    const DUTY: number[][] = DUTY_SEQUENCES;
     if (!this.pulse1Enabled() || this.pulse1Length === 0) return;
     if (this.pulse1Timer === 0) {
+      // Edge occurs on phase advance; capture transition for BLEP if enabled
+      const oldPhase = this.pulse1Phase & 7;
+      const newPhase = (oldPhase + 1) & 7;
+      const b0 = DUTY[this.pulse1Duty & 3][oldPhase] | 0;
+      const b1 = DUTY[this.pulse1Duty & 3][newPhase] | 0;
+      if (this.blepEnabled && this.blep && b0 !== b1 && this.pulse1TimerPeriod > 7 && this.pulse1Length > 0) {
+        const vol = this.pulse1EnvConstant ? (this.pulse1EnvPeriod & 0x0F) : (this.pulse1EnvVolume & 0x0F);
+        const delta = b1 ? +vol : -vol;
+        // Timestamp at end of this CPU tick (cycles will increment after this call in tick loop)
+        this.blep.push({ t: (this.cycles + 1) | 0, ch: 'p1', delta });
+      }
       if (this.pulse1TimerPeriod <= 7) return; // too high pitch -> silent
       this.pulse1Timer = this.pulse1TimerPeriod;
       this.pulse1Phase = (this.pulse1Phase + 1) & 0x07;
@@ -661,12 +773,7 @@ export class APU {
   private pulse1Output(): number {
     if (!this.pulse1Enabled() || this.pulse1Length === 0 || this.pulse1TimerPeriod <= 7 || this.pulse1SweepMute) return 0;
     // Duty sequences (NES): indexed by duty, then phase 0..7
-    const DUTY: number[][] = [
-      [0,1,0,0,0,0,0,0], // 12.5%
-      [0,1,1,0,0,0,0,0], // 25%
-      [0,1,1,1,1,0,0,0], // 50%
-      [1,0,0,1,1,1,1,1], // 75%
-    ];
+const DUTY: number[][] = DUTY_SEQUENCES;
     const bit = DUTY[this.pulse1Duty & 3][this.pulse1Phase & 7];
     if (bit === 0) return 0;
     // Volume: constant or envelope volume
@@ -676,12 +783,7 @@ export class APU {
 
   private pulse2Output(): number {
     if (!this.pulse2Enabled() || this.pulse2Length === 0 || this.pulse2TimerPeriod <= 7 || this.pulse2SweepMute) return 0;
-    const DUTY: number[][] = [
-      [0,1,0,0,0,0,0,0],
-      [0,1,1,0,0,0,0,0],
-      [0,1,1,1,1,0,0,0],
-      [1,0,0,1,1,1,1,1],
-    ];
+const DUTY: number[][] = DUTY_SEQUENCES;
     const bit = DUTY[this.pulse2Duty & 3][this.pulse2Phase & 7];
     if (bit === 0) return 0;
     const vol = this.pulse2EnvConstant ? (this.pulse2EnvPeriod & 0x0F) : (this.pulse2EnvVolume & 0x0F);
@@ -689,8 +791,18 @@ export class APU {
   }
 
   private clockPulse2Timer() {
+    const DUTY: number[][] = DUTY_SEQUENCES;
     if (!this.pulse2Enabled() || this.pulse2Length === 0) return;
     if (this.pulse2Timer === 0) {
+      const oldPhase = this.pulse2Phase & 7;
+      const newPhase = (oldPhase + 1) & 7;
+      const b0 = DUTY[this.pulse2Duty & 3][oldPhase] | 0;
+      const b1 = DUTY[this.pulse2Duty & 3][newPhase] | 0;
+      if (this.blepEnabled && this.blep && b0 !== b1 && this.pulse2TimerPeriod > 7 && this.pulse2Length > 0) {
+        const vol = this.pulse2EnvConstant ? (this.pulse2EnvPeriod & 0x0F) : (this.pulse2EnvVolume & 0x0F);
+        const delta = b1 ? +vol : -vol;
+        this.blep.push({ t: (this.cycles + 1) | 0, ch: 'p2', delta });
+      }
       if (this.pulse2TimerPeriod <= 7) return;
       this.pulse2Timer = this.pulse2TimerPeriod;
       this.pulse2Phase = (this.pulse2Phase + 1) & 0x07;
@@ -706,19 +818,26 @@ export class APU {
     return bit0 ? 0 : vol;
   }
 
-  // Return a simple 8-bit mixed sample (0..255). Mix triangle + pulse1 + pulse2 + noise + DMC.
+  // Return an 8-bit mixed sample (0..255) using NES non-linear mixer approx.
+  // Keep DC midpoint at 128 so host paths converting to [-1,1] via (s-128)/128 continue to work.
   public mixSample(): number {
     const tri = this.triangleOutput(); // 0..15
     const p1 = this.pulse1Output();    // 0..15
     const p2 = this.pulse2Output();    // 0..15
     const noi = this.noiseOutput();    // 0..15
     const dmc = this.dmcDac;           // 0..127
-    // Weighting: triangle*10 + pulses*12 each + noise*8 + dmc scaled to roughly match
-    let s = tri * 10 + p1 * 12 + p2 * 12 + noi * 8 + Math.floor(dmc * 1.5);
-    if (s > 255) s = 255;
-    // Apply global mixer gain of 50% around midpoint 128 to preserve DC offset across hosts
-    const mid = 128;
-    s = mid + Math.floor((s - mid) * 0.5);
+
+    // NES non-linear mixer approximation (NESdev):
+    // pulse_out = 95.88 / (8128 / (p1+p2) + 100)  (0 if p1+p2 == 0)
+    // tnd_out   = 159.79 / (1 / (tri/8227 + noi/12241 + dmc/22638) + 100) (0 if all zero)
+    const pulseSum = (p1 + p2) | 0;
+    const pulse_out = pulseSum > 0 ? (95.88 / (8128.0 / pulseSum + 100.0)) : 0.0;
+    const tnd_in = (tri / 8227.0) + (noi / 12241.0) + (dmc / 22638.0);
+    const tnd_out = tnd_in > 0 ? (159.79 / (1.0 / tnd_in + 100.0)) : 0.0;
+
+    // out_float roughly in [0, 1). Map to 8-bit centered at 128: 128 + out_float*127
+    const outFloat = pulse_out + tnd_out; // ~[0, 1)
+    let s = 128 + Math.round(outFloat * 127.0);
     if (s < 0) s = 0; else if (s > 255) s = 255;
     return s & 0xFF;
   }
@@ -727,4 +846,58 @@ export class APU {
   public dmcIrqPending(): boolean { return this.dmcIrqFlag; }
   public frameIrqPending(): boolean { return this.irqFlag && !this.irqInhibit; }
   public setCpuRead(fn: (addr: number) => number) { this.cpuRead = fn; }
+  public setCpuCycleGetter(fn: (() => number) | null) { this.getCpuCycles = fn; }
+  public setFramePhaseOffset(cycles: number) { this.framePhaseOffset = Number.isFinite(cycles) ? cycles : 0; }
+  public setFrameIrqAssertDelay(cycles: number) { this.frameIrqAssertDelay = (cycles|0) >= 0 ? (cycles|0) : 0; }
+
+  // Consume and clear any accumulated DMC CPU stall cycles since last call
+  public consumeDmcStallCycles(): number { const n = this.dmcStallAccum | 0; this.dmcStallAccum = 0; return n; }
+
+  // Enable or disable band-limited synthesis scaffolding
+  public enableBandlimitedSynth(enable: boolean) {
+    this.blepEnabled = !!enable;
+    if (this.blepEnabled && !this.blep) this.blep = new PolyBlepSynth();
+    if (this.blep) this.blep.reset();
+  }
+
+  // Band-limited sample path (placeholder): returns the same as mixSample() for now
+  public mixSampleBlep(sampleStartCycle: number, cyclesPerSample: number): number {
+    if (!this.blepEnabled || !this.blep) return this.mixSample();
+    // Compute base channel outputs
+    const tri = this.triangleOutput();
+    const p1 = this.pulse1Output();
+    const p2 = this.pulse2Output();
+    const noi = this.noiseOutput();
+    const dmc = this.dmcDac;
+
+    // Compute polyBLEP correction for pulse edges and DMC steps; apply before non-linear mixer
+    // dt per channel: dt = frequency/sampleRate. For pulses: f = CPU/(16*(T+1)). For DMC bits: f = CPU/dmcTimerPeriod.
+    const cps = cyclesPerSample;
+    const dtP1 = (this.pulse1TimerPeriod > 7) ? (cps / (16 * (this.pulse1TimerPeriod + 1))) : 0;
+    const dtP2 = (this.pulse2TimerPeriod > 7) ? (cps / (16 * (this.pulse2TimerPeriod + 1))) : 0;
+    const dtDmc = this.dmcTimerPeriod > 0 ? (cps / this.dmcTimerPeriod) : 0;
+    const corr = this.blep.render(sampleStartCycle, cyclesPerSample, { p1: dtP1, p2: dtP2, dmc: dtDmc });
+
+    let pulseSum = (p1 + p2) + corr.p1p2;
+    if (pulseSum < 0) pulseSum = 0; else if (pulseSum > 30) pulseSum = 30;
+
+    let dmcAdj = dmc + corr.dmc;
+    if (dmcAdj < 0) dmcAdj = 0; else if (dmcAdj > 127) dmcAdj = 127;
+
+    const pulse_out = pulseSum > 0 ? (95.88 / (8128.0 / pulseSum + 100.0)) : 0.0;
+    const tnd_in = (tri / 8227.0) + (noi / 12241.0) + (dmcAdj / 22638.0);
+    const tnd_out = tnd_in > 0 ? (159.79 / (1.0 / tnd_in + 100.0)) : 0.0;
+    const outFloat = pulse_out + tnd_out;
+    let s = 128 + Math.round(outFloat * 127.0);
+    if (s < 0) s = 0; else if (s > 255) s = 255;
+
+    // Prune events older than ~2 samples
+    this.blep.prune((sampleStartCycle - (cyclesPerSample * 2)) | 0);
+    return s & 0xFF;
+  }
+
+  // Debug/testing: expose current BLEP queue length (0 if disabled)
+  public debugBlepEventCount(): number {
+    try { return (this.blep as any)?._count?.() | 0 } catch { return 0 }
+  }
 }

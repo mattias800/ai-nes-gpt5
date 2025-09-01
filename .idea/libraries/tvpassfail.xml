@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="tvpassfail">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/roms/nes-test-roms/tvpassfail/tvpassfail.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

@@ -23,8 +23,27 @@ export class Cartridge {
     }
   }
 
-  readCpu(addr: Word): Byte { return this.mapper.cpuRead(addr); }
-  writeCpu(addr: Word, v: Byte): void { this.mapper.cpuWrite(addr, v); }
+  readCpu(addr: Word): Byte {
+    const val = this.mapper.cpuRead(addr);
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.TRACE_BLARGG === '1' && addr >= 0x6000 && addr <= 0x6003) {
+        // eslint-disable-next-line no-console
+        console.log(`[cart] read $${addr.toString(16).padStart(4,'0')} => $${(val&0xFF).toString(16).padStart(2,'0')}`);
+      }
+    } catch {}
+    return val;
+  }
+  writeCpu(addr: Word, v: Byte): void {
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.TRACE_BLARGG === '1' && addr >= 0x6000 && addr <= 0x6003) {
+        // eslint-disable-next-line no-console
+        console.log(`[cart] write $${addr.toString(16).padStart(4,'0')} <= $${(v&0xFF).toString(16).padStart(2,'0')}`);
+      }
+    } catch {}
+    this.mapper.cpuWrite(addr, v);
+  }
   readChr(addr: Word): Byte { return this.mapper.ppuRead(addr); }
   writeChr(addr: Word, v: Byte): void { this.mapper.ppuWrite(addr, v); }
 

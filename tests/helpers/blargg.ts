@@ -57,7 +57,18 @@ export const runBlarggRom = (romPath: string, opts: BlarggRunOpts = {}): BlarggR
     if (requireMagic && !hasMagic(sys)) return { status: 0x80, msg: '' };
     const status = readU8(sys, 0x6000);
     const msg = readCStr(sys);
-    if (msg.length > 0) lastMsg = msg;
+    if (msg.length > 0) {
+      if (msg !== lastMsg) {
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && (env.TRACE_BLARGG === '1' || env.TRACE_BLARGG_MSG === '1')) {
+            // eslint-disable-next-line no-console
+            console.log(`[blargg] msg="${msg.replace(/\n/g, ' ')}" cycles=${sys.cpu.state.cycles}`);
+          }
+        } catch {}
+        lastMsg = msg;
+      }
+    }
     return { status, msg };
   };
 

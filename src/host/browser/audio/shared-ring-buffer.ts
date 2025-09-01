@@ -41,6 +41,8 @@ export interface RingBufferWriter {
   write: (srcInterleaved: Float32Array) => number
   freeSpace: () => number
   occupancy: () => number
+  consumerOccupancy: () => number
+  debugRW: () => { r: number; w: number }
 }
 
 export const getWriter = (bundle: SabBundle): RingBufferWriter => {
@@ -55,9 +57,7 @@ export const getWriter = (bundle: SabBundle): RingBufferWriter => {
     const occ = ((w - r + capacity) % capacity)|0
     const free = (capacity - 1 - occ)|0
     const toWriteFrames = Math.min(framesRequested, free)|0
-    // Overrun if we couldn't write all frames requested
     if (toWriteFrames < framesRequested) Atomics.add(control, H.Overruns, 1)
-    // Copy into ring (interleaved)
     let framesWritten = 0
     while (framesWritten < toWriteFrames) {
       const curW = (Atomics.load(control, H.WriteIdx)|0)
@@ -71,8 +71,7 @@ export const getWriter = (bundle: SabBundle): RingBufferWriter => {
       Atomics.store(control, H.WriteIdx, newW)
       framesWritten += chunkFrames
     }
-    const newOcc = ((Atomics.load(control, H.WriteIdx)|0 - (Atomics.load(control, H.ReadIdx)|0) + capacity) % capacity)|0
-    Atomics.store(control, H.LastOccupancy, newOcc)
+    // Do not update LastOccupancy here; leave it as a consumer-published metric
     return toWriteFrames
   }
   const freeSpace = (): number => {
@@ -82,6 +81,8 @@ export const getWriter = (bundle: SabBundle): RingBufferWriter => {
     return (capacity - 1 - occ)|0
   }
   const occupancy = (): number => ((Atomics.load(control, H.WriteIdx)|0 - (Atomics.load(control, H.ReadIdx)|0) + capacity) % capacity)|0
-  return { write, freeSpace, occupancy }
+  const consumerOccupancy = (): number => Atomics.load(control, H.LastOccupancy)|0
+  const debugRW = (): { r: number; w: number } => ({ r: Atomics.load(control, H.ReadIdx)|0, w: Atomics.load(control, H.WriteIdx)|0 })
+  return { write, freeSpace, occupancy, consumerOccupancy, debugRW }
 }
 

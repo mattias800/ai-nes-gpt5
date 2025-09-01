@@ -31,8 +31,33 @@ export class NesIO {
         return this.pad1.read();
       case 0x4017:
         return this.pad2.read();
-      case 0x4015:
-        return this.apu ? this.apu.read4015() : 0x00;
+      case 0x4015: {
+        const v = this.apu ? this.apu.read4015() : 0x00;
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          const cyc = this.getCpuCycles ? this.getCpuCycles() : 0;
+          let log = false;
+          if (env && env.TRACE_APU_4015 === '1') log = true;
+          // Optional targeted read trace within a cycles window and address filter
+          const win = env?.TRACE_READ_WINDOW as string | undefined;
+          const addrs = env?.TRACE_READ_ADDRS as string | undefined;
+          let inWin = true;
+          if (win) {
+            const m = /^(\d+)-(\d+)$/.exec(win);
+            if (m) { const a = parseInt(m[1], 10) | 0; const b = parseInt(m[2], 10) | 0; inWin = cyc >= a && cyc <= b; }
+          }
+          let addrMatch = true;
+          if (addrs) {
+            const set = new Set(addrs.split(',').map(s => parseInt(s.trim(), 16) & 0xFFFF));
+            addrMatch = set.has(0x4015);
+          }
+          if (inWin && addrMatch && (log || win || addrs)) {
+            // eslint-disable-next-line no-console
+            console.log(`[io] read $4015 => $${(v&0xFF).toString(16).padStart(2,'0')} at CPU cyc=${cyc}`);
+          }
+        } catch {}
+        return v;
+      }
       default:
         return 0x00;
     }
@@ -55,7 +80,11 @@ export class NesIO {
         if (this.getCpuCycles && this.addCpuCycles) {
           const cyc = this.getCpuCycles();
           const stall = (cyc & 1) ? 514 : 513;
+          // Advance CPU cycle counter
           this.addCpuCycles(stall);
+          // Keep PPU/APU in sync during DMA stall
+          try { this.ppu.tick(stall * 3); } catch {}
+          try { if (this.apu) (this.apu as any).tick?.(stall); } catch {}
         }
         break;
       }
@@ -65,6 +94,14 @@ export class NesIO {
         break;
       }
       case 0x4017: {
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.TRACE_APU_4015 === '1') {
+            const cyc = this.getCpuCycles ? this.getCpuCycles() : 0;
+            // eslint-disable-next-line no-console
+            console.log(`[io] write $4017 <= $${(value&0xFF).toString(16).padStart(2,'0')} at CPU cyc=${cyc}`);
+          }
+        } catch {}
         if (this.apu) this.apu.write4017(value);
         break;
       }

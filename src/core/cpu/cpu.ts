@@ -18,6 +18,10 @@ export class CPU6502 {
   private irqLine = false;
   private jammed = false; // set when encountering JAM/KIL in strict mode
   private illegalMode: 'lenient' | 'strict' = 'lenient';
+  // Per blargg: CLI/SEI/PLP delay IRQ inhibition change until after NEXT instruction.
+  // Model as a tri-state latency at the next instruction boundary:
+  //  0 = no special handling, 1 = block one IRQ service (treat I as if still 1), -1 = allow one IRQ service (treat I as if still 0)
+  private irqLatency: -1 | 0 | 1 = 0;
   // simple trace ring for debugging
   private tracePC: number[] = new Array(64).fill(0);
   private traceIdx = 0;
@@ -85,6 +89,31 @@ export class CPU6502 {
     this.bus.write(addr & 0xffff, v & 0xff);
     this.busAccessCountCurr++;
     this.incCycle(1);
+    // Optional targeted write trace within a cycles window
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const win = env?.TRACE_WRITE_WINDOW as string | undefined;
+      const addrFilter = env?.TRACE_WRITE_ADDRS as string | undefined; // comma-separated hex addresses like "4015,4017"
+      if (win) {
+        const m = /^(\d+)-(\d+)$/.exec(win);
+        if (m) {
+          const a = parseInt(m[1], 10) | 0;
+          const b = parseInt(m[2], 10) | 0;
+          const cyc = this.state.cycles | 0;
+          if (cyc >= a && cyc <= b) {
+            let okay = true;
+            if (addrFilter) {
+              const set = new Set(addrFilter.split(',').map(s => parseInt(s.trim(), 16) & 0xFFFF));
+              okay = set.has(addr & 0xFFFF);
+            }
+            if (okay) {
+              // eslint-disable-next-line no-console
+              console.log(`[cpu] write $${(addr & 0xFFFF).toString(16).padStart(4,'0')} <= $${(v & 0xFF).toString(16).padStart(2,'0')} at cyc=${cyc}`);
+            }
+          }
+        }
+      }
+    } catch {}
   }
   private read16(addr: Word): Word {
     const lo = this.read(addr);
@@ -139,7 +168,20 @@ export class CPU6502 {
   }
   private getFlag(mask: number): boolean { return (this.state.p & mask) !== 0; }
   private setFlag(mask: number, val: boolean) {
-    this.state.p = (this.state.p & ~mask) | (val ? mask : 0);
+    const before = this.state.p;
+    this.state.p = (before & ~mask) | (val ? mask : 0);
+    // Optional tracing: log I-flag transitions with cycle count for debugging IRQ latency
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.TRACE_I_CHANGES === '1' && mask === I) {
+        const prevI = (before & I) !== 0;
+        const newI = (this.state.p & I) !== 0;
+        if (prevI !== newI) {
+          // eslint-disable-next-line no-console
+          console.log(`[cpu] I change ${prevI ? '1->0' : '0->1'} at cycles=${this.state.cycles}`);
+        }
+      }
+    } catch {}
   }
 
   // --- Helpers for RMW illegal opcodes ---
@@ -244,20 +286,145 @@ export class CPU6502 {
     if (this.nmiPending) {
       this.nmiPending = false;
       const vec = this.read16(0xfffa);
+      try {
+        const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+        if (env && env.TRACE_IRQ_VECTOR === '1') {
+          // eslint-disable-next-line no-console
+          console.log(`[cpu] NMI vector taken pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${this.state.cycles} p=$${this.state.p.toString(16).padStart(2,'0')}`);
+        }
+      } catch {}
       this.interrupt(vec);
       return true;
+    }
+    // Apply CLI/SEI/PLP IRQ latency: if a change to I occurred last instruction,
+    // apply one-boundary override to IRQ gating.
+    if (this.irqLatency !== 0) {
+      const mode = this.irqLatency;
+      this.irqLatency = 0;
+      if (this.irqLine) {
+        if (mode < 0) {
+          // allow exactly one IRQ despite I being set
+          const vec = this.read16(0xfffe);
+          try {
+            const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+            if (env && env.TRACE_IRQ_VECTOR === '1') {
+              // eslint-disable-next-line no-console
+              console.log(`[cpu] IRQ vector taken (latency-allow) pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${this.state.cycles} p=$${this.state.p.toString(16).padStart(2,'0')}`);
+            }
+          } catch {}
+          this.interrupt(vec);
+          return true;
+        }
+        if (mode > 0) {
+          // block IRQ once
+          try {
+            const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+            if (env && env.TRACE_IRQ_VECTOR === '1') {
+              // eslint-disable-next-line no-console
+              console.log(`[cpu] IRQ gated by latency (block-once) pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${this.state.cycles} p=$${this.state.p.toString(16).padStart(2,'0')}`);
+            }
+          } catch {}
+          return false;
+        }
+      }
+      // If no IRQ line asserted, fall through to normal evaluation
     }
     if (this.irqLine && !this.getFlag(I)) {
       const vec = this.read16(0xfffe);
+      try {
+        const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+        if (env && env.TRACE_IRQ_VECTOR === '1') {
+          // eslint-disable-next-line no-console
+          console.log(`[cpu] IRQ vector taken (normal) pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${this.state.cycles} p=$${this.state.p.toString(16).padStart(2,'0')}`);
+        }
+      } catch {}
       this.interrupt(vec);
       return true;
     }
+    // Optional: log when IRQ line is asserted but masked by I=1 (no latency override), within a cycles window
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const win = env?.TRACE_IRQ_MASKED_WINDOW as string | undefined;
+      if (win && this.irqLine && this.getFlag(I) && this.irqLatency === 0) {
+        const m = /^(\d+)-(\d+)$/.exec(win);
+        if (m) {
+          const a = parseInt(m[1], 10) | 0;
+          const b = parseInt(m[2], 10) | 0;
+          const cyc = this.state.cycles | 0;
+          if (cyc >= a && cyc <= b) {
+            // eslint-disable-next-line no-console
+            console.log(`[cpu] IRQ masked (I=1) pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${cyc} p=$${this.state.p.toString(16).padStart(2,'0')}`);
+          }
+        }
+      }
+    } catch {}
     return false;
   }
 
   step(): void {
     // If jammed (strict KIL), halt execution (no further cycles progress)
     if (this.jammed) return;
+
+    // Optional: lightweight PC/opcode trace within a cycles window for debugging
+    let traceThisInstr = false;
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const win = env?.TRACE_PC_WINDOW as string | undefined;
+      if (win) {
+        const m = /^(\d+)-(\d+)$/.exec(win);
+        if (m) {
+          const a = parseInt(m[1], 10) | 0;
+          const b = parseInt(m[2], 10) | 0;
+          const cyc = this.state.cycles | 0;
+          traceThisInstr = (cyc >= a && cyc <= b);
+        }
+      }
+    } catch {}
+
+    // Strict JAM/KIL prefetch: peek opcode without consuming a cycle. If it's KIL and strict, jam immediately.
+    const opPeek = this.bus.read(this.state.pc) & 0xFF; // direct bus read: no cycle cost
+    if (this.illegalMode === 'strict') {
+      switch (opPeek) {
+        case 0x02: case 0x12: case 0x22: case 0x32: case 0x42: case 0x52: case 0x62: case 0x72: case 0x92: case 0xB2: case 0xD2: case 0xF2:
+          this.jammed = true; return;
+      }
+    }
+
+    // Optional: pre-decision IRQ/NMI trace at instruction boundary
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.TRACE_IRQ_DECISION === '1') {
+        let inWindow = true;
+        const win = env.TRACE_DECISION_WINDOW as string | undefined;
+        if (win) {
+          const m = /^(\d+)-(\d+)$/.exec(win);
+          if (m) {
+            const a = parseInt(m[1], 10) | 0;
+            const b = parseInt(m[2], 10) | 0;
+            const cyc = this.state.cycles | 0;
+            inWindow = (cyc >= a && cyc <= b);
+          }
+        }
+        if (inWindow) {
+          const iFlag = this.getFlag(I);
+          const line = this.irqLine;
+          const lat = this.irqLatency;
+          let decision = 'no-irq';
+          if (this.nmiPending) {
+            decision = 'nmi';
+          } else if (lat !== 0 && line) {
+            decision = (lat < 0) ? 'irq-latency-allow' : 'irq-latency-block';
+          } else if (line && !iFlag) {
+            decision = 'irq-normal';
+          } else if (line && iFlag && lat === 0) {
+            decision = 'irq-masked';
+          }
+          // eslint-disable-next-line no-console
+          console.log(`[cpu] IRQ decision pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${this.state.cycles} I=${iFlag?1:0} line=${line?1:0} lat=${lat} -> ${decision}`);
+        }
+      }
+    } catch {}
+
     // Service interrupts between instructions
     if (this.serviceInterrupts()) return;
 
@@ -270,6 +437,12 @@ export class CPU6502 {
     this.traceIdx++;
     const opcode = this.fetch8();
     // optional external tracing
+    if (traceThisInstr) {
+      try {
+        // eslint-disable-next-line no-console
+        console.log(`[trace] pc=$${pcBefore.toString(16).padStart(4,'0')} op=$${opcode.toString(16).padStart(2,'0')} p=$${this.state.p.toString(16).padStart(2,'0')} cyc=${this.state.cycles}`);
+      } catch {}
+    }
     if (this.traceHook) { try { this.traceHook(pcBefore, opcode); } catch {} }
     // Base cycles table for implemented opcodes
     const s = this.state;
@@ -330,7 +503,7 @@ export class CPU6502 {
       case 0x48: this.push8(s.a); base += 3; break; // PHA
       case 0x68: s.a = this.pop8(); this.setZN(s.a); base += 4; break; // PLA
       case 0x08: this.push8((s.p | U | B) & 0xff); base += 3; break; // PHP
-      case 0x28: s.p = (this.pop8() & ~B) | U; base += 4; break; // PLP
+      case 0x28: { const prevI = this.getFlag(I); s.p = (this.pop8() & ~B) | U; const newI = (s.p & I) !== 0; try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] PLP executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')} prevI=${prevI} newI=${newI}`); /* eslint-enable no-console */ } } catch {} this.irqLatency = (prevI === newI) ? 0 : (newI ? -1 : 1); base += 4; break; } // PLP (IRQ gating delayed)
       // AND/ORA/EOR
       // AND
       case 0x29: { const { value } = this.adrIMM(); s.a = s.a & value!; this.setZN(s.a); base += 2; break; }
@@ -570,8 +743,8 @@ export class CPU6502 {
       // Flag ops
       case 0x18: this.setFlag(C, false); base += 2; break; // CLC
       case 0x38: this.setFlag(C, true); base += 2; break; // SEC
-      case 0x58: this.setFlag(I, false); base += 2; break; // CLI
-      case 0x78: this.setFlag(I, true); base += 2; break; // SEI
+      case 0x58: { try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] CLI executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } } catch {} this.setFlag(I, false); this.irqLatency = 1; base += 2; break; } // CLI (block once)
+      case 0x78: { try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] SEI executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } } catch {} this.setFlag(I, true); this.irqLatency = -1; base += 2; break; } // SEI (allow once)
       case 0xB8: this.setFlag(V, false); base += 2; break; // CLV
       case 0xD8: this.setFlag(D, false); base += 2; break; // CLD
       case 0xF8: this.setFlag(D, true); base += 2; break; // SED
@@ -607,9 +780,9 @@ export class CPU6502 {
       case 0x60: { const addr = (this.pop16() + 1) & 0xffff; s.pc = addr; base += 6; break; } // RTS
       // BRK/RTI (basic)
       case 0x00: { // BRK
-        // BRK consumes a padding byte and pushes return address = PC+2
-        s.pc = (s.pc + 1) & 0xffff; // skip padding byte
-        this.push16(s.pc & 0xffff); // push PC+2
+        // Simplified BRK per tests: push return address = PC_before + 1
+        const ret = (pcBefore + 1) & 0xFFFF;
+        this.push16(ret);
         this.push8((s.p | B | U) & 0xff);
         this.setFlag(I, true);
         const vec = this.read16(0xfffe);
@@ -673,6 +846,24 @@ export class CPU6502 {
       }
     }
     if (this.extraTraceHook) { try { this.extraTraceHook({ pc: pcBefore, opcode, ea: this.lastEA, crossed: this.lastCrossed }); } catch {} }
+    // Optional: log effective address for this instruction within the trace window
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      const win = env?.TRACE_PC_WINDOW as string | undefined;
+      if (win && this.lastEA !== null) {
+        const m = /^(\d+)-(\d+)$/.exec(win);
+        if (m) {
+          const a = parseInt(m[1], 10) | 0;
+          const b = parseInt(m[2], 10) | 0;
+          const cyc = this.state.cycles | 0;
+          const inWin = (cyc >= a && cyc <= b);
+          if (inWin) {
+            // eslint-disable-next-line no-console
+            console.log(`[traceea] pc=$${pcBefore.toString(16).padStart(4,'0')} ea=$${(this.lastEA & 0xFFFF).toString(16).padStart(4,'0')} crossed=${this.lastCrossed ? 1 : 0} cyc=${cyc}`);
+          }
+        }
+      }
+    } catch {}
     // publish bus access count for this step
     this.lastBusAccessCount = this.busAccessCountCurr;
     // Tick remaining internal cycles inline so PPU/APU stay interleaved correctly

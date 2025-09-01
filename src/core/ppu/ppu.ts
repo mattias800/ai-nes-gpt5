@@ -135,9 +135,9 @@ export class PPU {
       }
       case 0x2007: {
         const addr = this.v & 0x3FFF;
-        // Manual A12 evaluation for CPU-driven PPUDATA reads to CHR space (bypass deglitch)
-        this.evalA12FromAddr(addr);
-        let value: number;
+          // Apply A12 deglitch filter even for CPU-driven CHR reads
+          this.detectA12FromAddr(addr);
+          let value: number;
         if (addr >= 0x3F00 && addr <= 0x3FFF) {
           // Palette reads are not buffered
           value = this.readPalette(addr & 0x1F);
@@ -211,17 +211,16 @@ export class PPU {
         } else {
           this.t = (this.t & 0x7F00) | value;
           this.v = this.t;
-          // Manual A12 clocking via $2006 writes: evaluate A12 transition from the updated VRAM address
-          // This emulates the MMC3 counter being clocked by toggling bit 12 of the VRAM address even without CHR fetches.
-          this.evalA12FromAddr(this.v & 0x3FFF);
+          // Evaluate A12 transition with deglitch from the updated VRAM address
+          this.detectA12FromAddr(this.v & 0x3FFF);
           this.w = 0;
         }
         break;
       }
       case 0x2007: { // PPUDATA
         const addr = this.v & 0x3FFF;
-        // Manual A12 evaluation for CPU-driven PPUDATA writes to CHR space (bypass deglitch)
-        this.evalA12FromAddr(addr);
+        // Apply A12 deglitch filter for CPU-driven CHR writes
+        this.detectA12FromAddr(addr);
         this.ppuWrite(addr, value);
         this.v = (this.v + this.vramIncrement()) & 0x7FFF;
         break;
@@ -317,8 +316,8 @@ export class PPU {
           // BG-driven pulse at ~324 if background@$1000 currently selected AND background rendering is enabled,
           // and no sprite-phase pulse was emitted earlier in this line
           if (this.cycle === 324) {
-            // Evaluate against live PPUCTRL at the moment of the background fetch phase
-            const emit = (!this.linePulseDone && bgOn && ((this.ctrl & 0x10) !== 0));
+            // Emit background-driven pulse when BG rendering is enabled and no earlier sprite pulse this line
+            const emit = (!this.linePulseDone && bgOn);
             if (this.traceEnabled && this.scanline === 0) {
               if (this.phaseTrace.length > 256) this.phaseTrace.shift();
               this.phaseTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, ctrl: this.ctrl & 0xFF, mask: this.mask & 0xFF, emitted: emit });
@@ -379,8 +378,8 @@ export class PPU {
           const bgUses1000 = (this.ctrl & 0x10) !== 0;
           const bgOn = (this.mask & 0x08) !== 0;
           if (this.cycle === 324) {
-            // On pre-render, only background fetch occurs; emit pulse only if bg@$1000 and bg enabled
-            if (bgOn && bgUses1000) {
+            // On pre-render, emit one background pulse if BG rendering is enabled
+            if (bgOn) {
               this.a12DetectOverride = true; this.ppuRead(0x1000); this.a12DetectOverride = false;
             } else {
               this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false;

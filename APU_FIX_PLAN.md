@@ -1,25 +1,26 @@
 # APU Fix & Accuracy Plan (Checklist)
 
 Immediate high-value fixes
-- [ ] Noise channel output polarity
-  - [ ] Flip noise output so bit0==1 yields silence, bit0==0 yields envelope/constant volume
-  - [ ] Add unit test ensuring output is lower when bit0==1 than when bit0==0
-- [ ] Pulse sweep unit: mute and edge correctness
-  - [ ] Compute sweep target and set a per-channel mute flag when target > 0x7FF or target < 8 (only when sweep enabled and shift>0)
-  - [ ] Preserve “reload only on first half-frame” behavior; maintain divider semantics consistent with period P causing P+1 interval
-  - [ ] Clear mute when sweep disabled or shift==0
-  - [ ] Add unit tests for overflow-mute and target<8 mute cases
-- [ ] System reset must reset APU
-  - [ ] Call apu.reset() in NESSystem.reset()
+- [x] Noise channel output polarity
+  - [x] Flip noise output so bit0==1 yields silence, bit0==0 yields envelope/constant volume
+  - [x] Add unit test ensuring output is lower when bit0==1 than when bit0==0
+- [x] Pulse sweep unit: mute and edge correctness
+  - [x] Compute sweep target and set a per-channel mute flag when target > 0x7FF or target < 8 (only when sweep enabled and shift>0)
+  - [x] Preserve “reload only on first half-frame” behavior; maintain divider semantics consistent with period P causing P+1 interval
+  - [x] Clear mute when sweep disabled or shift==0
+  - [x] Add unit tests for overflow-mute and target<8 mute cases
+- [x] System reset must reset APU
+  - [x] Call apu.reset() in NESSystem.reset()
   - [ ] Add a sanity test around system reset behavior if needed
 - [ ] Non-linear mixer (prepare, may be split if needed)
-  - [ ] Implement NES non-linear mixer equations (pulse_out and tnd_out)
-  - [ ] Map to existing 8-bit sample return without changing host paths; preserve 128 baseline
-  - [ ] Add unit tests validating numeric outputs for representative channel values
+  - [x] Implement NES non-linear mixer equations (pulse_out and tnd_out)
+  - [x] Map to existing 8-bit sample return without changing host paths; preserve 128 baseline
+  - [x] Add unit tests validating numeric outputs for representative channel values
+  - [x] Add DC-block filter in host audio worker (low-cut); low-pass filter TBD
 
 DMC timing and behavioral fidelity
-- [ ] CPU stall timing during DMC fetches
-  - [ ] Add APU→CPU stall hook (4 cycles per fetch) and gate via flag for perf
+- [x] CPU stall timing during DMC fetches
+  - [x] Add APU→CPU stall hook (approx. 4 cycles per fetch) and apply in system step
   - [ ] Micro-tests verifying instruction elongation during active DMC
   - [ ] ROM tests: dmc_dma_timing, dmc_irq_timing
 - [ ] DMC output/edge cases
@@ -29,6 +30,7 @@ DMC timing and behavioral fidelity
 
 Frame counter timing precision
 - [ ] Fractional-cycle sequencer edges
+  - [x] Add configurable timing mode hook (integer vs fractional placeholder)
   - [ ] Replace integer tick edges with fractional (e.g., 3729.5, 7456.5, …)
   - [ ] Verify $4017 write side-effects (immediate quarter+half clocks for 5-step) and IRQ inhibit/clear
   - [ ] Add micro-tests for edge timing and write-in-sequence cases
@@ -42,7 +44,8 @@ Anti-aliasing and resampling
   - [ ] Bit-identical outputs across runs; unit tests for resampling correctness
 
 PAL support
-- [ ] Add PAL period tables, frame sequencer timings, and region configuration
+- [x] Add region configuration plumbing and PAL table scaffolding
+- [ ] Replace placeholders with proper PAL tables and frame sequencer timings
 - [ ] Run a subset of tests in PAL mode (or SpecAPU PAL comparison)
 
 Channel audits and tests
@@ -64,7 +67,7 @@ Test coverage addenda
 - [ ] Mixer numeric tests (non-linear), plus simple spectral checks once anti-aliasing lands
 
 Documentation and ergonomics
-- [ ] docs/apu-spec.md (spec summary and constants)
-- [ ] src/apu/constants.ts (NTSC/PAL tables, length table, duty tables)
+- [x] docs/apu-spec.md (spec summary and constants) — updated with mixer, DC-block, and timing notes
+- [x] src/apu/constants.ts (NTSC/PAL tables, length table, duty tables) — NTSC shipped; PAL placeholders added
 - [ ] Developer docs: running APU tests and interpreting failures
 

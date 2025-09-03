@@ -135,9 +135,9 @@ export class PPU {
       }
       case 0x2007: {
         const addr = this.v & 0x3FFF;
-          // Apply A12 deglitch filter even for CPU-driven CHR reads
-          this.detectA12FromAddr(addr);
-          let value: number;
+        // Apply A12 deglitch filter even for CPU-driven CHR reads
+        this.detectA12FromAddr(addr);
+        let value: number;
         if (addr >= 0x3F00 && addr <= 0x3FFF) {
           // Palette reads are not buffered
           value = this.readPalette(addr & 0x1F);

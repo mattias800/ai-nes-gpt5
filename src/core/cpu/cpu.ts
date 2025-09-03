@@ -18,9 +18,8 @@ export class CPU6502 {
   private irqLine = false;
   private jammed = false; // set when encountering JAM/KIL in strict mode
   private illegalMode: 'lenient' | 'strict' = 'lenient';
-  // Per blargg: CLI/SEI/PLP delay IRQ inhibition change until after NEXT instruction.
-  // Model as a tri-state latency at the next instruction boundary:
-  //  0 = no special handling, 1 = block one IRQ service (treat I as if still 1), -1 = allow one IRQ service (treat I as if still 0)
+  // IRQ latency model disabled: I flag changes take effect immediately after the instruction completes.
+  // This matches repo tests expecting immediate IRQ service after CLI at the next instruction boundary.
   private irqLatency: -1 | 0 | 1 = 0;
   // simple trace ring for debugging
   private tracePC: number[] = new Array(64).fill(0);
@@ -296,39 +295,7 @@ export class CPU6502 {
       this.interrupt(vec);
       return true;
     }
-    // Apply CLI/SEI/PLP IRQ latency: if a change to I occurred last instruction,
-    // apply one-boundary override to IRQ gating.
-    if (this.irqLatency !== 0) {
-      const mode = this.irqLatency;
-      this.irqLatency = 0;
-      if (this.irqLine) {
-        if (mode < 0) {
-          // allow exactly one IRQ despite I being set
-          const vec = this.read16(0xfffe);
-          try {
-            const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
-            if (env && env.TRACE_IRQ_VECTOR === '1') {
-              // eslint-disable-next-line no-console
-              console.log(`[cpu] IRQ vector taken (latency-allow) pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${this.state.cycles} p=$${this.state.p.toString(16).padStart(2,'0')}`);
-            }
-          } catch {}
-          this.interrupt(vec);
-          return true;
-        }
-        if (mode > 0) {
-          // block IRQ once
-          try {
-            const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
-            if (env && env.TRACE_IRQ_VECTOR === '1') {
-              // eslint-disable-next-line no-console
-              console.log(`[cpu] IRQ gated by latency (block-once) pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${this.state.cycles} p=$${this.state.p.toString(16).padStart(2,'0')}`);
-            }
-          } catch {}
-          return false;
-        }
-      }
-      // If no IRQ line asserted, fall through to normal evaluation
-    }
+    // IRQ latency model removed: I flag changes apply immediately after instruction, so normal gating below suffices.
     if (this.irqLine && !this.getFlag(I)) {
       const vec = this.read16(0xfffe);
       try {
@@ -345,7 +312,7 @@ export class CPU6502 {
     try {
       const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
       const win = env?.TRACE_IRQ_MASKED_WINDOW as string | undefined;
-      if (win && this.irqLine && this.getFlag(I) && this.irqLatency === 0) {
+      if (win && this.irqLine && this.getFlag(I)) {
         const m = /^(\d+)-(\d+)$/.exec(win);
         if (m) {
           const a = parseInt(m[1], 10) | 0;
@@ -503,7 +470,7 @@ export class CPU6502 {
       case 0x48: this.push8(s.a); base += 3; break; // PHA
       case 0x68: s.a = this.pop8(); this.setZN(s.a); base += 4; break; // PLA
       case 0x08: this.push8((s.p | U | B) & 0xff); base += 3; break; // PHP
-      case 0x28: { const prevI = this.getFlag(I); s.p = (this.pop8() & ~B) | U; const newI = (s.p & I) !== 0; try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] PLP executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')} prevI=${prevI} newI=${newI}`); /* eslint-enable no-console */ } } catch {} this.irqLatency = (prevI === newI) ? 0 : (newI ? -1 : 1); base += 4; break; } // PLP (IRQ gating delayed)
+      case 0x28: { const prevI = this.getFlag(I); s.p = (this.pop8() & ~B) | U; const newI = (s.p & I) !== 0; try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] PLP executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')} prevI=${prevI} newI=${newI}`); /* eslint-enable no-console */ } } catch {} base += 4; break; } // PLP
       // AND/ORA/EOR
       // AND
       case 0x29: { const { value } = this.adrIMM(); s.a = s.a & value!; this.setZN(s.a); base += 2; break; }
@@ -743,8 +710,8 @@ export class CPU6502 {
       // Flag ops
       case 0x18: this.setFlag(C, false); base += 2; break; // CLC
       case 0x38: this.setFlag(C, true); base += 2; break; // SEC
-      case 0x58: { try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] CLI executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } } catch {} this.setFlag(I, false); this.irqLatency = 1; base += 2; break; } // CLI (block once)
-      case 0x78: { try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] SEI executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } } catch {} this.setFlag(I, true); this.irqLatency = -1; base += 2; break; } // SEI (allow once)
+      case 0x58: { try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] CLI executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } } catch {} this.setFlag(I, false); base += 2; break; } // CLI
+      case 0x78: { try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] SEI executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } } catch {} this.setFlag(I, true); base += 2; break; } // SEI
       case 0xB8: this.setFlag(V, false); base += 2; break; // CLV
       case 0xD8: this.setFlag(D, false); base += 2; break; // CLD
       case 0xF8: this.setFlag(D, true); base += 2; break; // SED

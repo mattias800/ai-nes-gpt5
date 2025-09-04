@@ -313,7 +313,7 @@ export class CPU6502 {
       return true;
     }
     // Check if IRQ should be serviced normally
-    if (this.irqLine && !this.getFlag(I) && !this.irqInhibitNext) {
+    if (this.irqLine && !this.getFlag(I)) {
       const vec = this.read16(0xfffe);
       try {
         const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
@@ -491,17 +491,13 @@ export class CPU6502 {
       case 0x68: s.a = this.pop8(); this.setZN(s.a); base += 4; break; // PLA
       case 0x08: this.push8((s.p | U | B) & 0xff); base += 3; break; // PHP
       case 0x28: { 
-        const prevI = this.getFlag(I); 
+        const prevI = this.getFlag(I);
         s.p = (this.pop8() & ~B) | U; 
-        const newI = (s.p & I) !== 0; 
-        try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] PLP executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')} prevI=${prevI} newI=${newI}`); /* eslint-enable no-console */ } } catch {} 
-        // If I changed from 1 to 0, delay IRQ by one instruction
-        if (prevI && !newI) {
+        const newI = (s.p & I) !== 0;
+        // If I changed from 1 to 0 (cleared), and IRQ line is active, delay the IRQ by one instruction
+        if (prevI && !newI && this.irqLine) {
           this.irqInhibitNext = true;
-          // If IRQ is pending, mark it as delayed to fire after next instruction
-          if (this.irqLine) {
-            this.delayedIrqPending = true;
-          }
+          this.delayedIrqPending = true;
         }
         base += 4; 
         break; 
@@ -749,13 +745,10 @@ export class CPU6502 {
         try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] CLI executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } } catch {} 
         const wasSet = this.getFlag(I);
         this.setFlag(I, false); 
-        // If I was set and is now clear, delay IRQ by one instruction
-        if (wasSet) {
+        // If I was set and is now clear, and IRQ line is active, delay the IRQ by one instruction
+        if (wasSet && this.irqLine) {
           this.irqInhibitNext = true;
-          // If IRQ is pending, mark it as delayed to fire after next instruction
-          if (this.irqLine) {
-            this.delayedIrqPending = true;
-          }
+          this.delayedIrqPending = true;
         }
         base += 2; 
         break; 

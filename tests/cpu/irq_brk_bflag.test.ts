@@ -15,20 +15,31 @@ describe('CPU BRK vs IRQ pushes P with correct B flag', () => {
     // Step NOP
     cpu.step();
     // Execute BRK: should push PC and P with B=1, jump to $9000
-    const sBeforeBrk = cpu.state.s; // 0xFD initially
     cpu.step();
     expect(cpu.state.pc).toBe(0x9000);
     // Stack after BRK: [S] now at 0xFA; pushed P at 0x1FB, PCL at 0x1FC, PCH at 0x1FD
     const pPushedBrk = bus.read(0x01FB);
     expect((pPushedBrk & 0x10) !== 0).toBe(true); // B set
+    // Check what address was pushed (BRK pushes PC+1 where PC after fetching opcode is $8002)
+    const pushedPCL = bus.read(0x01FC);
+    const pushedPCH = bus.read(0x01FD);
+    const pushedPC = pushedPCL | (pushedPCH << 8);
 
     // RTI back
     cpu.step();
-
-    // Now trigger a maskable IRQ: ensure I=0 first
-    // Place CLI; NOP at $8002 and then let IRQ service
-    bus.write(0x8002, 0x58); // CLI
-    cpu.step(); // step CLI at $8002
+    // After RTI, PC should be at the address BRK pushed ($8003)
+    expect(cpu.state.pc).toBe(pushedPC);
+    expect(cpu.state.pc).toBe(0x8003);
+    
+    // Now trigger a maskable IRQ: need to clear I first!
+    // Place CLI at current PC (which is $8003 after RTI from BRK)
+    bus.write(cpu.state.pc, 0x58); // CLI
+    cpu.step(); // step CLI
+    expect(cpu.state.pc).toBe(0x8004);
+    
+    // Verify I flag is now clear
+    expect((cpu.state.p & 0x04) === 0).toBe(true); // I should be clear
+    
     // Request IRQ and execute next instruction fetch -> should service
     const sBeforeIrq = cpu.state.s;
     cpu.requestIRQ();

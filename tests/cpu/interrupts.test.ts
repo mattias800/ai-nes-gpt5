@@ -31,8 +31,9 @@ describe('CPU: interrupts', () => {
     // SEI: set I; request IRQ should be held off
     cpu.step();
     cpu.requestIRQ();
-    cpu.step(); // CLI clears I; still before executing NOP, service IRQ on next step
-    cpu.step();
+    cpu.step(); // CLI clears I; but IRQ is delayed by one instruction after CLI
+    cpu.step(); // NOP executes (IRQ delayed)
+    cpu.step(); // Now IRQ is serviced
     expect(cpu.state.pc).toBe(0x9000);
   });
 });

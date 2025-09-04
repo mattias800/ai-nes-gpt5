@@ -802,14 +802,32 @@ export class CPU6502 {
       case 0x60: { const addr = (this.pop16() + 1) & 0xffff; s.pc = addr; base += 6; break; } // RTS
       // BRK/RTI (basic)
       case 0x00: { // BRK
-        // Simplified BRK per tests: push return address = PC_before + 1
-        const ret = (pcBefore + 1) & 0xFFFF;
-        this.push16(ret);
-        this.push8((s.p | B | U) & 0xff);
-        this.setFlag(I, true);
-        const vec = this.read16(0xfffe);
-        s.pc = vec;
-        base += 7;
+        // BRK is a 2-byte instruction. PC has been incremented after fetching opcode.
+        // We need to push PC+1 (to skip the signature byte)
+        const ret = (s.pc + 1) & 0xFFFF;
+        
+        // Check if NMI is pending before we complete BRK
+        // If NMI occurs during BRK, it should take over but BRK's pushed flags should have B set
+        if (this.nmiPending) {
+          // NMI hijacks BRK - push PC+1 and flags with B set, then vector to NMI
+          this.push16(ret);
+          this.push8((s.p | B | U) & 0xff); // Push with B flag set (as BRK would)
+          this.setFlag(I, true);
+          this.nmiPending = false;
+          const vec = this.read16(0xfffa); // NMI vector instead of IRQ
+          s.pc = vec;
+          // Include cycles for interrupt sequence 
+          this.incCycle(2);
+          base += 7;
+        } else {
+          // Normal BRK execution
+          this.push16(ret);
+          this.push8((s.p | B | U) & 0xff);
+          this.setFlag(I, true);
+          const vec = this.read16(0xfffe);
+          s.pc = vec;
+          base += 7;
+        }
         break;
       }
       case 0x40: { // RTI

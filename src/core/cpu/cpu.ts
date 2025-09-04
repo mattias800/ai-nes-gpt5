@@ -20,6 +20,8 @@ export class CPU6502 {
   private illegalMode: 'lenient' | 'strict' = 'lenient';
   // IRQ inhibit for CLI/SEI/PLP: delays IRQ service by one instruction
   private irqInhibitNext = false;
+  // Track if we have a delayed IRQ from CLI that should fire once regardless of I flag
+  private delayedIrqPending = false;
   // simple trace ring for debugging
   private tracePC: number[] = new Array(64).fill(0);
   private traceIdx = 0;
@@ -56,6 +58,7 @@ export class CPU6502 {
     this.state = { a: 0, x: 0, y: 0, s: 0xfd, pc: vector & 0xffff, p: 0x24, cycles: 0 };
     this.nmiPending = false; this.irqPending = false; this.jammed = false;
     this.irqInhibitNext = false;
+    this.delayedIrqPending = false;
   }
 
   // Configure behavior for unofficial KIL/JAM opcodes
@@ -295,7 +298,21 @@ export class CPU6502 {
       this.interrupt(vec);
       return true;
     }
-    // Check if IRQ should be serviced (CLI/SEI/PLP delay handling in step())
+    // Check if we have a delayed IRQ from CLI that should fire once regardless of I flag
+    if (this.delayedIrqPending) {
+      this.delayedIrqPending = false;
+      const vec = this.read16(0xfffe);
+      try {
+        const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+        if (env && env.TRACE_IRQ_VECTOR === '1') {
+          // eslint-disable-next-line no-console
+          console.log(`[cpu] IRQ vector taken (delayed from CLI) pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${this.state.cycles} p=$${this.state.p.toString(16).padStart(2,'0')}`);
+        }
+      } catch {}
+      this.interrupt(vec);
+      return true;
+    }
+    // Check if IRQ should be serviced normally
     if (this.irqLine && !this.getFlag(I) && !this.irqInhibitNext) {
       const vec = this.read16(0xfffe);
       try {
@@ -392,12 +409,11 @@ export class CPU6502 {
       }
     } catch {}
 
-    // Check if we need to skip IRQ for this instruction due to CLI/SEI/PLP
-    const skipIRQ = this.irqInhibitNext;
-    this.irqInhibitNext = false; // Clear the flag for next instruction
-    
     // Service interrupts between instructions (unless inhibited)
-    if (!skipIRQ && this.serviceInterrupts()) return;
+    if (!this.irqInhibitNext && this.serviceInterrupts()) return;
+    
+    // Clear the inhibit flag after the check
+    this.irqInhibitNext = false;
 
     const pcBefore = this.state.pc;
     // reset per-step bus access counter
@@ -479,9 +495,13 @@ export class CPU6502 {
         s.p = (this.pop8() & ~B) | U; 
         const newI = (s.p & I) !== 0; 
         try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] PLP executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')} prevI=${prevI} newI=${newI}`); /* eslint-enable no-console */ } } catch {} 
-        // If I changed from 1 to 0 and IRQ is pending, delay IRQ by one instruction
-        if (prevI && !newI && this.irqLine) {
+        // If I changed from 1 to 0, delay IRQ by one instruction
+        if (prevI && !newI) {
           this.irqInhibitNext = true;
+          // If IRQ is pending, mark it as delayed to fire after next instruction
+          if (this.irqLine) {
+            this.delayedIrqPending = true;
+          }
         }
         base += 4; 
         break; 
@@ -729,9 +749,13 @@ export class CPU6502 {
         try { const env = (typeof process !== 'undefined' ? (process as any).env : undefined); if (env && env.TRACE_IRQ_VECTOR === '1') { /* eslint-disable no-console */ console.log(`[cpu] CLI executed pc=$${pcBefore.toString(16).padStart(4,'0')} cycles=${s.cycles} p=$${s.p.toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } } catch {} 
         const wasSet = this.getFlag(I);
         this.setFlag(I, false); 
-        // If I was set and is now clear, and IRQ is pending, delay IRQ by one instruction
-        if (wasSet && this.irqLine) {
+        // If I was set and is now clear, delay IRQ by one instruction
+        if (wasSet) {
           this.irqInhibitNext = true;
+          // If IRQ is pending, mark it as delayed to fire after next instruction
+          if (this.irqLine) {
+            this.delayedIrqPending = true;
+          }
         }
         base += 2; 
         break; 
@@ -791,6 +815,11 @@ export class CPU6502 {
       case 0x40: { // RTI
         s.p = (this.pop8() & ~B) | U;
         s.pc = this.pop16();
+        // RTI just restores state - it doesn't cause IRQ delays
+        // If RTI sets I flag, cancel any pending delayed IRQ from previous CLI
+        if ((s.p & I) !== 0) {
+          this.delayedIrqPending = false;
+        }
         base += 6;
         break;
       }

@@ -7,7 +7,22 @@ export interface BusDevice {
 }
 
 export class CPUBus implements BusDevice {
+  constructor() {
+    // Optional RAM init pattern for debugging alignment (e.g., match external emulator power-on RAM)
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined)
+      const fillStr = env?.NES_RAM_INIT as string | undefined
+      if (fillStr) {
+        const v = parseInt(fillStr, 16) & 0xFF
+        this.ram.fill(v)
+      }
+    } catch {}
+  }
   private ram = new Uint8Array(0x800); // 2KB internal RAM
+  public loadRAM(data: Uint8Array, offset = 0): void {
+    const n = Math.min(this.ram.length - (offset|0), data.length)
+    if (n > 0) this.ram.set(data.subarray(0, n), offset|0)
+  }
   // Placeholders for PPU/APU/IO/cart
   private readIO: (addr: Word) => Byte = () => 0x00;
   private writeIO: (addr: Word, value: Byte) => void = () => {};

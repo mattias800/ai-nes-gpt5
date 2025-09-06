@@ -42,6 +42,8 @@ export class PPU {
   private a12DetectOverride = false; // allow detection during synthetic pulses even with rendering on
   // Per-visible-scanline pulse state
   private linePulseDone = false;
+  // Option to force per-scanline MMC3 pulses independent of PPUMASK (for timing-only tests)
+  private uncondPulses = false;
 
   // Phase telemetry: capture s0 cycle-1 snapshot, and whether we emitted pulses at c260/c324
   private phaseTrace: Array<{ frame: number, scanline: number, cycle: number, ctrl: number, mask: number, emitted?: boolean }> = [];
@@ -54,6 +56,9 @@ export class PPU {
 
   // Read buffer for $2007
   private readBuffer = 0;
+  // Power-on semantics helper: first few $2002 reads return MAME-like pattern (gated by env)
+  private powerOnStatusReadCount = 0;
+  private powerOnStatusSeqEnabled = false;
 
   // Timing
   cycle = 0; // 0..340
@@ -77,6 +82,8 @@ export class PPU {
       const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
       if (env && env.PPU_TIMING_DEFAULT === 'vt') this.useVT = true;
       if (env && env.PPU_TRACE === '1') this.traceEnabled = true;
+      if (env && env.PPU_POWERON_STATUS_SEQ === '1') this.powerOnStatusSeqEnabled = true;
+      if (env && env.PPU_MMC3_UNCOND_PULSES === '1') this.uncondPulses = true;
     } catch {}
   }
 
@@ -104,8 +111,10 @@ export class PPU {
 
   reset() {
     this.ctrl = 0; this.mask = 0; this.status = 0;
+    // Power-on: MAME typically starts with VBlank low; first VBlank will assert on schedule.
     this.oamAddr = 0; this.w = 0; this.t = 0; this.v = 0; this.x = 0;
     this.readBuffer = 0; this.cycle = 0; this.scanline = 0; this.frame = 0;
+    this.powerOnStatusReadCount = 0;
     this.ctrlTrace.length = 0;
     this.maskTrace.length = 0;
     this.nmiOccurred = false; this.nmiOutput = false;
@@ -123,20 +132,41 @@ export class PPU {
     addr &= 0x2007; // caller should mirror to 2000-2007
     switch (addr) {
       case 0x2002: { // PPUSTATUS
-        const value = (this.status & 0xE0) | (this.readBuffer & 0x1F); // lower 5 bits return stale
+        let value = (this.status & 0xE0) | (this.readBuffer & 0x1F); // lower 5 bits return stale
+        // Optional power-on sequence: first two reads 0x00 then 0x80 on bit7 (disabled by default)
+        if (this.powerOnStatusSeqEnabled && this.powerOnStatusReadCount < 2) {
+          const seqBit7 = (this.powerOnStatusReadCount === 1) ? 0x80 : 0x00;
+          value = (value & 0x1F) | seqBit7;
+          this.powerOnStatusReadCount++;
+        }
         // Clear vblank flag and write toggle
         this.status &= ~0x80;
         this.w = 0;
         this.nmiOccurred = false;
-        return value;
+        // Optional debug: trace PPUSTATUS reads
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.TRACE_PPUSTATUS === '1') {
+            // eslint-disable-next-line no-console
+            console.log(`[ppu] read $2002 value=$${(value & 0xFF).toString(16).padStart(2,'0')} at f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+          }
+        } catch {}
+        return value & 0xFF;
       }
       case 0x2004: { // OAMDATA
         return this.oam[this.oamAddr & 0xFF];
       }
       case 0x2007: {
         const addr = this.v & 0x3FFF;
-        // Apply A12 deglitch filter even for CPU-driven CHR reads
-        this.detectA12FromAddr(addr);
+        // Apply A12 deglitch filter for CPU-driven reads as well, but only for CHR space (<$2000)
+        if (addr < 0x2000) this.detectA12FromAddr(addr);
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.PPU_A12_CPU_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.log(`[ppu-a12-cpu] $2007 read addr=$${addr.toString(16).padStart(4,'0')} f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+          }
+        } catch {}
         let value: number;
         if (addr >= 0x3F00 && addr <= 0x3FFF) {
           // Palette reads are not buffered
@@ -147,6 +177,8 @@ export class PPU {
           this.readBuffer = this.ppuRead(addr);
         }
         this.v = (this.v + this.vramIncrement()) & 0x7FFF;
+        // Evaluate A12 based on the post-increment VRAM address as well (PPUDATA read can cause A12 rises)
+        this.evalA12FromAddr(this.v & 0x3FFF, false);
         return value & 0xFF;
       }
       default:
@@ -163,6 +195,10 @@ export class PPU {
         if (this.traceEnabled) {
           if (this.ctrlTrace.length > 1024) this.ctrlTrace.shift();
           this.ctrlTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, ctrl: this.ctrl });
+          try {
+            // eslint-disable-next-line no-console
+            console.log(`[ppu] $2000<=${(this.ctrl & 0xFF).toString(16).padStart(2,'0')} @[f${this.frame} s${this.scanline} c${this.cycle}]`);
+          } catch {}
         }
         this.t = (this.t & 0xF3FF) | ((value & 0x03) << 10);
         const prev = this.nmiOutput;
@@ -178,6 +214,10 @@ export class PPU {
         if (this.traceEnabled) {
           if (this.maskTrace.length > 1024) this.maskTrace.shift();
           this.maskTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, mask: this.mask });
+          try {
+            // eslint-disable-next-line no-console
+            console.log(`[ppu] $2001<=${(this.mask & 0xFF).toString(16).padStart(2,'0')} @[f${this.frame} s${this.scanline} c${this.cycle}]`);
+          } catch {}
         }
         break;
       }
@@ -211,18 +251,34 @@ export class PPU {
         } else {
           this.t = (this.t & 0x7F00) | value;
           this.v = this.t;
-          // Evaluate A12 transition with deglitch from the updated VRAM address
-          this.detectA12FromAddr(this.v & 0x3FFF);
+          // Evaluate A12 immediately on $2006 writes: CPU-driven address changes should clock the MMC3
+          this.evalA12FromAddr(this.v & 0x3FFF, false);
+          try {
+            const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+            if (env && env.PPU_A12_CPU_DEBUG === '1') {
+              // eslint-disable-next-line no-console
+              console.log(`[ppu-a12-cpu] $2006 write v=$${(this.v & 0x3FFF).toString(16).padStart(4,'0')} f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+            }
+          } catch {}
           this.w = 0;
         }
         break;
       }
       case 0x2007: { // PPUDATA
         const addr = this.v & 0x3FFF;
-        // Apply A12 deglitch filter for CPU-driven CHR writes
-        this.detectA12FromAddr(addr);
+        // Apply A12 deglitch filter for CPU-driven writes as well, but only for CHR space (<$2000)
+        if (addr < 0x2000) this.detectA12FromAddr(addr);
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.PPU_A12_CPU_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.log(`[ppu-a12-cpu] $2007 write addr=$${addr.toString(16).padStart(4,'0')} f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+          }
+        } catch {}
         this.ppuWrite(addr, value);
         this.v = (this.v + this.vramIncrement()) & 0x7FFF;
+        // Evaluate A12 based on the post-increment VRAM address (PPUDATA write can step A12)
+        this.evalA12FromAddr(this.v & 0x3FFF, false);
         break;
       }
     }
@@ -258,6 +314,56 @@ export class PPU {
         this.cycle = 1;
       }
 
+      // Minimal A12 pulse model during per-scanline windows
+      // - Ensure A12 low early in each visible and pre-render scanline
+      // - Emit pulses at sprite/bg phases only when rendering is enabled, unless explicitly overridden
+      if ((this.scanline >= 0 && this.scanline <= 239) || this.scanline === 261) {
+        if (this.cycle === 1) {
+          this.linePulseDone = false;
+          // Snapshot PPUCTRL at start-of-line for mapper telemetry
+          this.ctrlLine = this.ctrl & 0xFF;
+          // Force an A12-low access to establish baseline for deglitch filter
+          this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false;
+          // Latch fine X for VT sampling
+          if (this.scanline >= 0 && this.scanline <= 239) this.latchedX = this.x & 0x07;
+        }
+        const allowPhasePulses = this.uncondPulses || renderingEnabled;
+        // Sprite-phase pulse near dot ~260 if sprites use $1000 (8x16 sprites treated as using $1000)
+        if (allowPhasePulses && this.cycle === 260) {
+          const height16 = (this.ctrl & 0x20) !== 0;
+          const spUses1000 = ((this.ctrl & 0x08) !== 0) || height16;
+          // Emit at sprite phase only if sprites select $1000
+          const emit = spUses1000;
+          if (this.traceEnabled && this.scanline === 0) {
+            if (this.phaseTrace.length > 256) this.phaseTrace.shift();
+            this.phaseTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, ctrl: this.ctrl & 0xFF, mask: this.mask & 0xFF, emitted: emit });
+          }
+          if (emit) {
+            this.a12DetectOverride = true; this.ppuRead(0x1000); this.a12DetectOverride = false;
+            this.linePulseDone = true;
+          } else {
+            this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false;
+          }
+        }
+        // Background-phase pulse near dot ~324 if background uses $1000 and no sprite-phase pulse already
+        if (allowPhasePulses && this.cycle === 324) {
+          const bgUses1000Now = (this.ctrl & 0x10) !== 0;
+          const ctrlSel1000 = (this.ctrl & 0x18) !== 0;
+          // If neither plane selects $1000, emit at bg phase only in unconditional mode
+          const emit = (!this.linePulseDone && (bgUses1000Now || (this.uncondPulses && !ctrlSel1000)));
+          if (this.traceEnabled && this.scanline === 0) {
+            if (this.phaseTrace.length > 256) this.phaseTrace.shift();
+            this.phaseTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, ctrl: this.ctrl & 0xFF, mask: this.mask & 0xFF, emitted: emit });
+          }
+          if (emit) {
+            this.a12DetectOverride = true; this.ppuRead(0x1000); this.a12DetectOverride = false;
+            this.linePulseDone = true;
+          } else {
+            this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false;
+          }
+        }
+      }
+
       // Per-dot behavior for scroll increments/copies when rendering
       if (renderingEnabled) {
         if (this.scanline >= 0 && this.scanline <= 239) {
@@ -267,11 +373,6 @@ export class PPU {
 
           // Sprite overflow evaluation at start of visible scanline (approximation):
           if (this.cycle === 1) {
-            // Reset per-line pulse state and latch fine X for vt sampling
-            this.linePulseDone = false;
-            this.latchedX = this.x & 0x07;
-            // Snapshot PPUCTRL at the start of the line (for telemetry only)
-            this.ctrlLine = this.ctrl & 0xFF;
             const height16 = (this.ctrl & 0x20) !== 0;
             const spriteHeight = height16 ? 16 : 8;
             let count = 0;
@@ -287,48 +388,10 @@ export class PPU {
 
           if (this.cycle === 256) this.incY();
           if (this.cycle === 257) this.copyX();
-          // Minimal CHR access simulation to drive A12 based on pattern table selection
-          // Ensure a low early each scanline
-          if (this.cycle === 1) { this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false; }
           // Record s0 c1 snapshot for diagnostics
           if (this.traceEnabled && this.scanline === 0 && this.cycle === 1) {
             if (this.phaseTrace.length > 256) this.phaseTrace.shift();
             this.phaseTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, ctrl: this.ctrl & 0xFF, mask: this.mask & 0xFF });
-          }
-          const bgOn = (this.mask & 0x08) !== 0;
-          const spOn = (this.mask & 0x10) !== 0;
-          // Sprite-driven pulse at ~260 if sprites@$1000 is currently selected AND sprite rendering is enabled
-          if (this.cycle === 260) {
-            // Evaluate against live PPUCTRL at the moment of the sprite fetch phase
-            const emit = spOn && ((this.ctrl & 0x08) !== 0);
-            if (this.traceEnabled && this.scanline === 0) {
-              if (this.phaseTrace.length > 256) this.phaseTrace.shift();
-              this.phaseTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, ctrl: this.ctrl & 0xFF, mask: this.mask & 0xFF, emitted: emit });
-            }
-            if (emit) {
-              this.a12DetectOverride = true; this.ppuRead(0x1000); this.a12DetectOverride = false;
-              this.linePulseDone = true;
-            } else {
-              // maintain low
-              this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false;
-            }
-          }
-          // BG-driven pulse at ~324 if background@$1000 currently selected AND background rendering is enabled,
-          // and no sprite-phase pulse was emitted earlier in this line
-          if (this.cycle === 324) {
-            // Emit background-driven pulse when BG rendering is enabled and no earlier sprite pulse this line
-            const emit = (!this.linePulseDone && bgOn);
-            if (this.traceEnabled && this.scanline === 0) {
-              if (this.phaseTrace.length > 256) this.phaseTrace.shift();
-              this.phaseTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, ctrl: this.ctrl & 0xFF, mask: this.mask & 0xFF, emitted: emit });
-            }
-            if (emit) {
-              this.a12DetectOverride = true; this.ppuRead(0x1000); this.a12DetectOverride = false;
-              this.linePulseDone = true;
-            } else {
-              // maintain low
-              this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false;
-            }
           }
 
           // Minimal sprite 0 hit detection (8x8 sprites only)
@@ -347,7 +410,16 @@ export class PPU {
                 const bgPix = (this.useVT ? (bgPixV || bgPixL) : bgPixL);
                 const sp0Pix = this.sampleSprite0Pixel(x, y);
                 if (bgPix !== 0 && sp0Pix !== 0) {
-                  this.status |= 0x40; // sprite 0 hit
+                  if ((this.status & 0x40) === 0) {
+                    this.status |= 0x40; // sprite 0 hit
+                    try {
+                      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+                      if (env && env.TRACE_SP0 === '1') {
+                        // eslint-disable-next-line no-console
+                        console.log(`[ppu] sprite0 SET at f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+                      }
+                    } catch {}
+                  }
                 }
               }
             }
@@ -373,17 +445,27 @@ export class PPU {
             }
           }
         } else if (this.scanline === 261) { // pre-render line
-          // Emit background prefetch A12 at ~324 only (sprites are not fetched on pre-render)
-          if (this.cycle === 1) { this.ppuRead(0x0FF8); this.ctrlLine = this.ctrl & 0xFF; } // ensure A12 low
-          const bgUses1000 = (this.ctrl & 0x10) !== 0;
-          const bgOn = (this.mask & 0x08) !== 0;
-          if (this.cycle === 324) {
-            // On pre-render, emit one background pulse if BG rendering is enabled
-            if (bgOn) {
-              this.a12DetectOverride = true; this.ppuRead(0x1000); this.a12DetectOverride = false;
-            } else {
-              this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false;
-            }
+          // Dot 1 of pre-render line: clear VBlank, sprite 0 hit, and sprite overflow
+          if (this.cycle === 1) {
+            const hadSp0 = (this.status & 0x40) !== 0;
+            const hadVb = (this.status & 0x80) !== 0;
+            this.status &= ~0x80; // clear vblank
+            this.status &= ~0x40; // clear sprite 0 hit
+            this.status &= ~0x20; // clear sprite overflow
+            this.nmiOccurred = false;
+            try {
+              const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+              if (env && env.TRACE_PPUSTATUS === '1') {
+                if (hadVb) {
+                  // eslint-disable-next-line no-console
+                  console.log(`[ppu] VBlank cleared at pre-render f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+                }
+                if (hadSp0 && (env.TRACE_SP0 === '1')) {
+                  // eslint-disable-next-line no-console
+                  console.log(`[ppu] sprite0 CLEAR at pre-render f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+                }
+              }
+            } catch {}
           }
           // Vertical bits copy only occurs when rendering is enabled
           if (renderingEnabled && this.cycle >= 280 && this.cycle <= 304) this.copyY();
@@ -400,6 +482,13 @@ export class PPU {
           // Enter VBlank at scanline 241, cycle 1
           this.status |= 0x80;
           if (this.nmiOutput) this.nmiOccurred = true;
+          try {
+            const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+            if (env && env.TRACE_PPUSTATUS === '1') {
+              // eslint-disable-next-line no-console
+              console.log(`[ppu] VBlank set at f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+            }
+          } catch {}
         } else if (this.scanline >= 262) {
           // Pre-render line entered
           this.scanline = 0;
@@ -412,11 +501,16 @@ export class PPU {
           } else {
             this.oddFrame = false;
           }
-          // clear vblank, sprite 0 hit, and sprite overflow at start of new frame
-          this.status &= ~0x80;
-          this.status &= ~0x40;
-          this.status &= ~0x20;
-          this.nmiOccurred = false;
+          // start of new frame: status bits were cleared at pre-render; nothing to clear here
+          if (wasVblank) {
+            try {
+              const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+              if (env && env.TRACE_PPUSTATUS === '1') {
+                // eslint-disable-next-line no-console
+                console.log(`[ppu] VBlank cleared at frame start f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+              }
+            } catch {}
+          }
         }
       }
     }
@@ -490,18 +584,27 @@ export class PPU {
   }
 
   // Evaluate an A12 transition based on a provided VRAM address (0..0x3FFF), applying deglitch filter
-  private detectA12FromAddr(a: Word): void {
+  private detectA12FromAddr(a: Word, force: boolean = false): void {
     const addr = a & 0x3FFF;
+    // Only CHR space (<$2000) is wired to the cartridge A12; ignore others entirely
+    if (addr >= 0x2000) return;
     const a12 = (addr >> 12) & 1;
     if (a12 === 0) {
       this.a12LastLowDot = this.dot;
     }
     if (this.lastA12 === 0 && a12 === 1) {
-      if (this.dot - this.a12LastLowDot >= this.a12Filter) {
+      if (force || (this.dot - this.a12LastLowDot >= this.a12Filter)) {
         if (this.traceEnabled) {
           if (this.traceA12.length > 1024) this.traceA12.shift();
           this.traceA12.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle });
         }
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.PPU_A12_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.log(`[ppu-a12] detect rise at f=${this.frame} sl=${this.scanline} cyc=${this.cycle} addr=$${addr.toString(16).padStart(4,'0')}${force?' (forced)':''}`);
+          }
+        } catch {}
         this.onA12Rise && this.onA12Rise();
       }
     }
@@ -509,24 +612,24 @@ export class PPU {
   }
 
   // Manual A12 evaluation when VRAM address (v) changes via CPU writes (e.g., $2006)
-  private evalA12FromAddr(a: Word): void {
+  private evalA12FromAddr(a: Word, force: boolean = false): void {
     const addr = a & 0x3FFF;
     if (addr < 0x2000) {
-      // For CPU-driven $2006 toggles, bypass deglitch: manual A12 clocks should always count
-      const a12 = (addr >> 12) & 1;
-      if (a12 === 0) this.a12LastLowDot = this.dot;
-      if (this.lastA12 === 0 && a12 === 1) {
-        if (this.traceEnabled) {
-          if (this.traceA12.length > 1024) this.traceA12.shift();
-          this.traceA12.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle });
-        }
-        this.onA12Rise && this.onA12Rise();
+      // Apply A12 detection for CPU-driven address changes; optionally bypass filter when forced
+      const prev = this.lastA12;
+      this.detectA12FromAddr(addr, force);
+      if (prev === 0 && this.lastA12 === 1) {
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.PPU_A12_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.log(`[ppu-a12] eval ${force?'(forced)':'(filtered)'} rise at f=${this.frame} sl=${this.scanline} cyc=${this.cycle} addr=$${addr.toString(16).padStart(4,'0')}`);
+          }
+        } catch {}
       }
-      this.lastA12 = a12;
     } else {
-      // Outside CHR space: treat as low for purposes of deglitch baseline
-      this.lastA12 = 0;
-      this.a12LastLowDot = this.dot;
+      // Outside CHR space: leave A12 detector state unchanged; the cart's A12 line is not driven
+      // Intentionally no-op
     }
   }
 

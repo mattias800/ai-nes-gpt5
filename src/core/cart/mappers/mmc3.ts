@@ -26,6 +26,8 @@ export class MMC3 implements Mapper {
   private trace: Array<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean, f?: number, s?: number, c?: number, ctrl?: number }> = [];
   private timeProvider: (() => { frame: number, scanline: number, cycle: number }) | null = null;
   private ctrlProvider: (() => number) | null = null;
+  // Optional behavior: assert IRQ on reload-to-zero (latch==0) to model 1-clocking behaviour
+  private assertOnRel0 = false;
   private addTrace(entry: { type: string, a?: number, v?: number, ctr?: number, en?: boolean, ctrl?: number }) {
     // Always record IRQ entries so tests relying on getTrace can detect first IRQ without env flags.
     if (!this.traceEnabled && entry.type !== 'IRQ') return;
@@ -48,6 +50,7 @@ export class MMC3 implements Mapper {
     try {
       const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
       if (env && env.MMC3_TRACE === '1') this.traceEnabled = true;
+      if (env && (env.MMC3_ASSERT_ON_RELOAD_ZERO === '1' || env.MMC3_1_CLOCK === '1')) this.assertOnRel0 = true;
     } catch {}
   }
 
@@ -84,17 +87,45 @@ export class MMC3 implements Mapper {
     } else if (addr >= 0xC000 && addr <= 0xDFFE && (addr & 1) === 0) {
       this.irqLatch = value;
       this.addTrace({ type: 'C000', v: value });
+      if (this.traceEnabled) {
+        try {
+          const t = this.timeProvider ? this.timeProvider() : null;
+          // eslint-disable-next-line no-console
+          console.log(`[mmc3] C000 latch=$${(value & 0xFF).toString(16).padStart(2,'0')}${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`);
+        } catch {}
+      }
     } else if (addr >= 0xC001 && addr <= 0xDFFF && (addr & 1) === 1) {
       // Request reload on next A12 rising edge
       this.reloadPending = true;
       this.addTrace({ type: 'C001' });
+      if (this.traceEnabled) {
+        try {
+          const t = this.timeProvider ? this.timeProvider() : null;
+          // eslint-disable-next-line no-console
+          console.log(`[mmc3] C001 reload${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`);
+        } catch {}
+      }
     } else if (addr >= 0xE000 && addr <= 0xFFFE && (addr & 1) === 0) {
       this.irqEnabled = false; this.irq = false;
       this.addTrace({ type: 'E000' });
+      if (this.traceEnabled) {
+        try {
+          const t = this.timeProvider ? this.timeProvider() : null;
+          // eslint-disable-next-line no-console
+          console.log(`[mmc3] E000 disable${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`);
+        } catch {}
+      }
     } else if (addr >= 0xE001 && addr <= 0xFFFF && (addr & 1) === 1) {
       // Enable IRQs immediately on write
       this.irqEnabled = true;
       this.addTrace({ type: 'E001' });
+      if (this.traceEnabled) {
+        try {
+          const t = this.timeProvider ? this.timeProvider() : null;
+          // eslint-disable-next-line no-console
+          console.log(`[mmc3] E001 enable${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`);
+        } catch {}
+      }
     }
   }
 
@@ -132,12 +163,16 @@ export class MMC3 implements Mapper {
       op = 'dec';
     }
 
-    // Record an IRQ event in trace when counter reaches zero on a visible line
-    if ((this.irqCounter === 0) && !onPreRender) {
+    // Record and assert IRQ only when it would actually be observable by the CPU
+    // Semantics adopted:
+    // - Assert on decrement-to-zero (classic)
+    // - Optionally, also assert on reload-to-zero (latch==0 or reload while counter==0 producing 0), enabling "1-clocking" behavior
+    // - Never assert on pre-render scanline
+    if (!onPreRender && this.irqEnabled && ((op === 'dec' && this.irqCounter === 0) || (this.assertOnRel0 && op === 'rel0'))) {
+      this.irq = true;
       this.addTrace({ type: 'IRQ' });
-      // Assert CPU IRQ line only for decrement-to-zero (not for reload paths)
-      if (this.irqEnabled && op === 'dec') {
-        this.irq = true;
+      if (this.traceEnabled) {
+        try { /* eslint-disable no-console */ console.log(`[mmc3] IRQ assert${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`); /* eslint-enable no-console */ } catch {}
       }
     }
 
@@ -146,6 +181,9 @@ export class MMC3 implements Mapper {
     (entry as any).op = op;
     (entry as any).pre = onPreRender;
     this.addTrace(entry);
+    if (this.traceEnabled) {
+      try { /* eslint-disable no-console */ console.log(`[mmc3] A12 op=${op} ctr=${this.irqCounter} en=${this.irqEnabled?1:0} pre=${onPreRender?1:0}`); /* eslint-enable no-console */ } catch {}
+    }
   }
 
   setMirrorCallback(cb: (mode: 'horizontal' | 'vertical') => void): void {

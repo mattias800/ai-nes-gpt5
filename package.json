@@ -31,7 +31,20 @@
     "nestest:trace": "tsx -r tsconfig-paths/register scripts/run-nestest-trace.ts",
     "nestest:diff": "mkdir -p out && npm run nestest:trace -- --max=${NESTEST_MAX:-0} > out/nestest.trace && diff -u roms/nestest.log out/nestest.trace || true",
     "nestest:compare": "tsx -r tsconfig-paths/register scripts/compare-nestest.ts",
-    "dump:wav": "tsx -r tsconfig-paths/register scripts/dump-wav.ts"
+    "dump:wav": "tsx -r tsconfig-paths/register scripts/dump-wav.ts",
+    "nestest:fetch": "node scripts/fetch-nestest-assets.mjs",
+    "nestest:validate:canonical": "node scripts/validate-nestest-log.mjs roms/nestest.log",
+    "trace:rom": "tsx -r tsconfig-paths/register scripts/trace-rom.ts",
+    "compare:log": "tsx -r tsconfig-paths/register scripts/compare-against-log.ts",
+    "trace:external": "node scripts/generate-trace-fceux.mjs",
+    "compare:external": "npm run compare:log -- --log=out/external-fceux.log",
+    "trace:mame": "node scripts/generate-trace-mame.mjs",
+    "compare:mame": "npm run compare:log -- --log=out/external-mame.log",
+    "trace:mame:regs": "node scripts/generate-trace-mame-regs.mjs",
+    "compare:mame:regs": "npm run compare:log -- --log=out/external-mame-regs.log",
+    "mame:dump": "node scripts/generate-mame-dump.mjs",
+    "mario:sync": "node scripts/chain-mario-compare.mjs",
+    "nestest:sync": "node scripts/chain-nestest-compare.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",

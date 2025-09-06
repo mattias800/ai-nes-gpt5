@@ -1,21 +1,18 @@
 import { NES_PALETTE } from './palette'
 import { createAudioSAB } from './audio/shared-ring-buffer'
 
-// Require SAB (COOP/COEP)
-if (!crossOriginIsolated) {
+// Prefer SAB (COOP/COEP) for low-latency audio, but fall back to video-only when unavailable
+const sabAvailable = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated) && (typeof SharedArrayBuffer !== 'undefined')
+if (!sabAvailable) {
   const div = document.createElement('div')
-  div.style.cssText = 'position:fixed;inset:0;background:#111;color:#fff;display:flex;align-items:center;justify-content:center;font:16px/1.4 system-ui;text-align:center;padding:24px;'
+  div.style.cssText = 'position:fixed;left:8px;bottom:8px;background:rgba(0,0,0,0.75);color:#fff;padding:10px 12px;border-radius:6px;max-width:520px;font:13px/1.4 system-ui;z-index:9999;'
   div.innerHTML = `
-    <div>
-      <h2 style="margin:0 0 12px 0">SharedArrayBuffer unavailable</h2>
-      <p>This app requires crossOriginIsolated (COOP/COEP) to use low-latency audio. Start the dev server or host with headers:</p>
-      <code style="display:inline-block;text-align:left;margin-top:8px">
-        Cross-Origin-Opener-Policy: same-origin<br/>
-        Cross-Origin-Embedder-Policy: require-corp
-      </code>
+    <div style="margin-bottom:6px;font-weight:600">Audio disabled (SharedArrayBuffer unavailable)</div>
+    <div>This host will run in video-only fallback. For audio, start via the dev server or host with headers:<br/>
+      <code style="display:inline-block;margin-top:4px">Cross-Origin-Opener-Policy: same-origin</code><br/>
+      <code style="display:inline-block">Cross-Origin-Embedder-Policy: require-corp</code>
     </div>`
   document.body.appendChild(div)
-  throw new Error('crossOriginIsolated=false')
 }
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
@@ -201,9 +198,24 @@ romInput.addEventListener('change', async (): Promise<void> => {
 
 startBtn.addEventListener('click', async (): Promise<void> => {
   if (!romBytes) return
-  await setupAudio()
-  await audioCtx!.resume()
-  const { sab } = startAudioGraph()
+  let sab: ReturnType<typeof createAudioSAB> | null = null
+  let sampleRate = 48000
+  const channels = 2
+  if (sabAvailable) {
+    try {
+      await setupAudio()
+      await audioCtx!.resume()
+      const started = audioCtx!.state === 'running'
+      if (started) {
+        const g = startAudioGraph()
+        sab = g.sab
+        sampleRate = audioCtx!.sampleRate
+      }
+    } catch (e) {
+      console.warn('Audio setup failed, falling back to no-audio mode:', e)
+      sab = null
+    }
+  }
   // Spawn worker and init
   worker = new Worker(new URL('./workers/nesCore.worker.ts', import.meta.url), { type: 'module' })
   worker.onmessage = (e: MessageEvent): void => {
@@ -220,15 +232,14 @@ startBtn.addEventListener('click', async (): Promise<void> => {
       onStats(d)
     }
   }
-  const channels = 2
-  worker.postMessage({ type: 'init', sab, sampleRate: audioCtx!.sampleRate, channels, targetFillFrames: 4096 })
+  worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB } : null, sampleRate, channels, targetFillFrames: 4096, noAudio: !sab })
   // Load ROM and start
   worker.postMessage({ type: 'load_rom', rom: romBytes, useVT: flags.useVT, strict: flags.strict, apuRegion: (window as any).__apuRegion, apuTiming: (window as any).__apuTiming, apuSynth: (window as any).__apuSynth }, [romBytes.buffer])
   worker.postMessage({ type: 'start' })
   running = true
   startBtn.disabled = true
   pauseBtn.disabled = false
-  statusEl.textContent = 'Running'
+  statusEl.textContent = sab ? 'Running' : 'Running (no audio)'
 })
 
 pauseBtn.addEventListener('click', (): void => {

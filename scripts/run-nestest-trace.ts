@@ -13,6 +13,7 @@ type Args = {
   cyclesOnly: boolean;
   illegal: "strict" | "lenient";
   rom: string;
+  seconds: number; // wall-clock seconds limit; 0 = disabled
 };
 
 function getEnv(name: string): string | null {
@@ -27,14 +28,17 @@ function parseArgs(): Args {
   let cyclesOnly = (getEnv("NESTEST_CYCLES_ONLY") || "0") === "1";
   let illegal: "strict" | "lenient" = (getEnv("NESTEST_ILLEGAL") as any) || "lenient";
   let rom = getEnv("NESTEST_ROM") || path.resolve("roms/nestest.nes");
+  let seconds = parseFloat(getEnv("TRACE_SECONDS") || "0");
   for (const a of argv) {
     if (a.startsWith("--max=")) max = parseInt(a.slice(6), 10);
     else if (a.startsWith("--start=")) start = parseInt(a.slice(8), 16);
     else if (a === "--cycles-only") cyclesOnly = true;
     else if (a.startsWith("--illegal=")) illegal = (a.slice(10) as any);
     else if (a.startsWith("--rom=")) rom = a.slice(6);
+    else if (a.startsWith("--seconds=")) seconds = parseFloat(a.slice(10));
   }
-  return { max, start, cyclesOnly, illegal, rom };
+  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+  return { max, start, cyclesOnly, illegal, rom, seconds };
 }
 
 function hex2(v: number) { return v.toString(16).toUpperCase().padStart(2, "0"); }
@@ -67,7 +71,11 @@ async function main() {
     });
   }
 
-  for (let i = 0; i < max; i++) {
+  const deadline = args.seconds > 0 ? ((typeof performance !== 'undefined' ? performance.now() : Date.now()) + args.seconds * 1000) : Number.POSITIVE_INFINITY;
+  let i = 0;
+  while (i < max) {
+    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (now >= deadline) break;
     const pc = cpu.state.pc & 0xFFFF;
     const dis = disasmAt((addr) => bus.read(addr), pc);
     if (args.cyclesOnly) {
@@ -78,6 +86,7 @@ async function main() {
       console.log(line);
     }
     cpu.step();
+    i++;
   }
 }
 

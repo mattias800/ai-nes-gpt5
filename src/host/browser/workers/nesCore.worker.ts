@@ -8,7 +8,7 @@ import { getWriter, type SabBundle } from '../audio/shared-ring-buffer'
 
 const CPU_HZ = 1789773
 
-interface InitMsg { type: 'init'; sab: SabBundle; sampleRate: number; channels: number; targetFillFrames: number }
+interface InitMsg { type: 'init'; sab?: SabBundle | null; sampleRate: number; channels: number; targetFillFrames: number; noAudio?: boolean }
 interface LoadRomMsg { type: 'load_rom'; rom: Uint8Array; useVT: boolean; strict: boolean; apuRegion?: 'NTSC'|'PAL'; apuTiming?: 'integer'|'fractional'; apuSynth?: 'raw'|'blep' }
 interface StartMsg { type: 'start' }
 interface PauseMsg { type: 'pause' }
@@ -25,6 +25,7 @@ let useBlep = false
 let audioTimer: number | null = null
 let videoTimer: number | null = null
 let targetFillFrames = 4096
+let noAudio = false
 
 // Simple DC-block filter state for audio (applied in worker before writing to SAB)
 let dcPrevIn = 0
@@ -164,8 +165,17 @@ const pumpAudio = (): void => {
   }
 }
 
+const stepOneFrame = (): void => {
+  if (!sys) return
+  const start = sys.ppu.frame
+  let guard = 0
+  // Hard cap to avoid runaway if something goes wrong; typical SMB frames need ~30k CPU cycles
+  while (sys.ppu.frame === start && guard < 20_000_000) { sys.stepInstruction(); guard++ }
+}
+
 const sendVideoFrame = (): void => {
   if (!sys) return
+  if (!writer) stepOneFrame()
   const fb = (sys.ppu as unknown as { getFrameBuffer: () => Uint8Array }).getFrameBuffer()
   // Transfer palette indices buffer to main; main will colorize
   const buf = new Uint8Array(fb)
@@ -185,8 +195,9 @@ const stopLoops = (): void => {
 const handleMessage = (e: MessageEvent<Msg>): void => {
   const msg = e.data
   switch (msg.type) {
-    case 'init': {
-      writer = getWriter(msg.sab)
+case 'init': {
+      noAudio = !!msg.noAudio
+      writer = msg.sab ? getWriter(msg.sab) : null
       sampleRate = msg.sampleRate|0
       channels = msg.channels|0
       targetFillFrames = msg.targetFillFrames|0
@@ -216,7 +227,7 @@ const handleMessage = (e: MessageEvent<Msg>): void => {
       dcPrevIn = 0; dcPrevOut = 0
       break
     }
-    case 'start': {
+case 'start': {
       run = true
       // Synchronous prefill to reduce initial underruns
       if (writer && sys) {

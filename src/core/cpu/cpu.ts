@@ -82,7 +82,31 @@ export class CPU6502 {
 
   // Memory helpers (each bus access consumes one CPU cycle)
   private read(addr: Word): Byte {
-    const v = this.bus.read(addr & 0xffff) & 0xff;
+    const a = addr & 0xffff;
+    const v = this.bus.read(a) & 0xff;
+    // Optional targeted trace: reads of PPUSTATUS ($2002 mirrors)
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.TRACE_2002_READS === '1') {
+        if (a >= 0x2000 && a < 0x4000 && ((a & 0x7) === 2)) {
+          let inWin = true;
+          const win = env.TRACE_2002_WINDOW as string | undefined;
+          if (win) {
+            const m = /^(\d+)-(\d+)$/.exec(win);
+            if (m) {
+              const aa = parseInt(m[1], 10) | 0;
+              const bb = parseInt(m[2], 10) | 0;
+              const cyc = this.state.cycles | 0;
+              inWin = (cyc >= aa && cyc <= bb);
+            }
+          }
+          if (inWin) {
+            // eslint-disable-next-line no-console
+            console.log(`[cpu] read $2002 => $${v.toString(16).padStart(2,'0')} at pc=$${this.state.pc.toString(16).padStart(4,'0')} cycles=${this.state.cycles}`);
+          }
+        }
+      }
+    } catch {}
     this.busAccessCountCurr++;
     this.incCycle(1);
     return v;

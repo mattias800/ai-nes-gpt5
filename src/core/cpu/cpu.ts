@@ -27,6 +27,13 @@ export class CPU6502 {
   private traceIdx = 0;
   // optional external per-instruction trace hook
   private traceHook: ((pc: number, opcode: number) => void) | null = null;
+  // Debug tracing controls
+  private spTraceEnabled = false;
+  private spTraceStart = 0;
+  private spTraceEnd = 0;
+  private traceStackWritesEnabled = false;
+  // Optional: trace when the top-of-stack (next RTS/RTI pull) matches a specific 16-bit value
+  private traceStackTopMatch: number | null = null;
   // optional extra per-instruction hook (effective address, page-cross)
   private extraTraceHook: ((info: { pc: number, opcode: number, ea: number | null, crossed: boolean }) => void) | null = null;
   private lastEA: number | null = null;
@@ -38,6 +45,29 @@ export class CPU6502 {
   private lastBusAccessCount = 0;
   constructor(private bus: CPUBus) {
     this.state = { a: 0, x: 0, y: 0, s: 0xfd, pc: 0, p: 0x24, cycles: 0 };
+    // Parse SP/stack tracing env once
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && typeof env.TRACE_SP_WINDOW === 'string' && env.TRACE_SP_WINDOW.length > 0) {
+        const m = /^(0x)?([0-9a-fA-F]+)-(0x)?([0-9a-fA-F]+)$/.exec(env.TRACE_SP_WINDOW);
+        if (m) {
+          const a = parseInt(m[2], 16) & 0xFFFF;
+          const b = parseInt(m[4], 16) & 0xFFFF;
+          this.spTraceStart = Math.min(a, b);
+          this.spTraceEnd = Math.max(a, b);
+          this.spTraceEnabled = true;
+        }
+      }
+      if (env && env.TRACE_STACK_WRITES === '1') this.traceStackWritesEnabled = true;
+      // Optional: parse TRACE_STACK_TOP_MATCH (hex 16-bit) to log when top-of-stack equals this return address
+      try {
+        const matchStr = env?.TRACE_STACK_TOP_MATCH as string | undefined;
+        if (matchStr && matchStr.length > 0) {
+          const v = parseInt(matchStr, 16) & 0xFFFF;
+          this.traceStackTopMatch = v;
+        }
+      } catch {}
+    } catch {}
   }
 
   // Enable/disable a per-instruction trace callback (for harness debugging)
@@ -72,6 +102,10 @@ export class CPU6502 {
   setCycleHook(fn: ((cycles: number) => void) | null) { this.cycleHook = fn; }
   // Expose the last step's bus access count (for scheduler to tick remaining internal cycles)
   getLastBusAccessCount(): number { return this.lastBusAccessCount; }
+
+  // BRK return push delta: 1 => push PC+2 (correct 6502), 0 => push PC+1 (simplified test mode)
+  private brkPushDelta: 0 | 1 = 1;
+  public setBrkReturnMode(mode: 'pc+2' | 'pc+1') { this.brkPushDelta = (mode === 'pc+2') ? 1 : 0; }
 
   // Increment CPU cycles and tick external hook (PPU/APU) inline
   private incCycle(n: number = 1) {
@@ -112,7 +146,14 @@ export class CPU6502 {
     return v;
   }
   private write(addr: Word, v: Byte): void {
-    this.bus.write(addr & 0xffff, v & 0xff);
+    const a16 = addr & 0xffff;
+    this.bus.write(a16, v & 0xff);
+    if (this.traceStackWritesEnabled && ((a16 & 0xFF00) === 0x0100)) {
+      const pc = this.state.pc & 0xFFFF;
+      if (!this.spTraceEnabled || (pc >= this.spTraceStart && pc <= this.spTraceEnd)) {
+        try { /* eslint-disable no-console */ console.log(`[stackwr] PC=$${pc.toString(16).padStart(4,'0')} [$${a16.toString(16).padStart(4,'0')}] <= $${(v & 0xFF).toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } catch {}
+      }
+    }
     this.busAccessCountCurr++;
     this.incCycle(1);
     // Optional targeted write trace within a cycles window
@@ -373,6 +414,8 @@ export class CPU6502 {
     // If jammed (strict KIL), halt execution (no further cycles progress)
     if (this.jammed) return;
 
+    const cycBeforeInstr = this.state.cycles | 0;
+
     // Optional: lightweight PC/opcode trace within a cycles window for debugging
     let traceThisInstr = false;
     try {
@@ -440,6 +483,13 @@ export class CPU6502 {
     this.irqInhibitNext = false;
 
     const pcBefore = this.state.pc;
+    // Optional SP trace (pre)
+    if (this.spTraceEnabled) {
+      const pcv = pcBefore & 0xFFFF;
+      if (pcv >= this.spTraceStart && pcv <= this.spTraceEnd) {
+        try { /* eslint-disable no-console */ console.log(`[sp] pre  PC=$${pcv.toString(16).padStart(4,'0')} SP=$${this.state.s.toString(16).padStart(2,'0')} P=$${this.state.p.toString(16).padStart(2,'0')} A=$${this.state.a.toString(16).padStart(2,'0')} X=$${this.state.x.toString(16).padStart(2,'0')} Y=$${this.state.y.toString(16).padStart(2,'0')}`); /* eslint-enable no-console */ } catch {}
+      }
+    }
     // reset per-step bus access counter
     this.busAccessCountCurr = 0;
     this.lastEA = null; this.lastCrossed = false;
@@ -815,13 +865,43 @@ export class CPU6502 {
       // Jumps/subroutines
       case 0x4C: { const { addr } = this.adrABS(); s.pc = addr!; base += 3; break; } // JMP abs
       case 0x6C: { const { addr } = this.adrIND(); s.pc = addr!; base += 5; break; } // JMP ind
-      case 0x20: { const addr = this.fetch16(); const ret = (s.pc - 1) & 0xffff; this.push16(ret); s.pc = addr; base += 6; break; } // JSR
-      case 0x60: { const addr = (this.pop16() + 1) & 0xffff; s.pc = addr; base += 6; break; } // RTS
+      case 0x20: { // JSR abs
+        const addr = this.fetch16();
+        const ret = (s.pc - 1) & 0xffff;
+        const spBefore = s.s & 0xFF;
+        this.push16(ret);
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.TRACE_JSR === '1') {
+            const spAfter = this.state.s & 0xFF;
+            const hiAddr = (0x0100 + ((spAfter + 1) & 0xFF)) & 0xFFFF; // where high byte was stored
+            const loAddr = (0x0100 + ((spAfter + 2) & 0xFF)) & 0xFFFF; // where low byte was stored
+            // eslint-disable-next-line no-console
+            console.log(`[cpu] JSR $${addr.toString(16).padStart(4,'0')} push=$${ret.toString(16).padStart(4,'0')} to [$${loAddr.toString(16).padStart(4,'0')},$${hiAddr.toString(16).padStart(4,'0')}] sp ${spBefore.toString(16).padStart(2,'0')}->${spAfter.toString(16).padStart(2,'0')}`);
+          }
+        } catch {}
+        s.pc = addr;
+        base += 6;
+        break;
+      } // JSR
+      case 0x60: { // RTS
+        const ret = this.pop16();
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.TRACE_RTS === '1') {
+            // Infer the two stack addresses just consumed: S increased by 2 during pop16()
+            const sp = this.state.s & 0xFF;
+            const loAddr = (0x0100 + ((sp - 1) & 0xFF)) & 0xFFFF;
+            const hiAddr = (0x0100 + (sp & 0xFF)) & 0xFFFF;
+            // eslint-disable-next-line no-console
+            console.log(`[cpu] RTS pop=$${ret.toString(16).padStart(4,'0')} from [$${loAddr.toString(16).padStart(4,'0')},$${hiAddr.toString(16).padStart(4,'0')}] -> sp=$${sp.toString(16).padStart(2,'0')}`);
+          }
+        } catch {}
+        const addr = (ret + 1) & 0xffff; s.pc = addr; base += 6; break; } // RTS
       // BRK/RTI (basic)
       case 0x00: { // BRK
-        // BRK is a 2-byte instruction. PC has been incremented after fetching opcode.
-        // We need to push PC+1 (to skip the signature byte)
-        const ret = (s.pc + 1) & 0xFFFF;
+        // BRK fetch advanced PC by 1. Push PC + brkPushDelta (pc+2 for conformance by default; pc+1 in simplified mode), then P|B|U, then vector.
+        const ret = (s.pc + this.brkPushDelta) & 0xFFFF;
         this.push16(ret);
         this.push8((s.p | B | U) & 0xff);
         this.setFlag(I, true);
@@ -914,5 +994,29 @@ export class CPU6502 {
     // Tick remaining internal cycles inline so PPU/APU stay interleaved correctly
     const internal = base - this.busAccessCountCurr;
     if (internal > 0) this.incCycle(internal);
+
+    // Optional: if TRACE_STACK_TOP_MATCH is set, log when the next RTS/RTI return address equals the target
+    if (this.traceStackTopMatch !== null) {
+      try {
+        const sTop = (this.state.s + 1) & 0xFF;
+        const lo = this.bus.read(0x0100 + sTop) & 0xFF;
+        const hi = this.bus.read(0x0100 + ((sTop + 1) & 0xFF)) & 0xFF;
+        const val = (hi << 8) | lo;
+        if (val === this.traceStackTopMatch) {
+          // eslint-disable-next-line no-console
+          console.log(`[stacktop] match=$${val.toString(16).padStart(4,'0')} at PC=$${this.state.pc.toString(16).padStart(4,'0')} SP=$${this.state.s.toString(16).padStart(2,'0')}`);
+        }
+      } catch {}
+    }
+
+    // Optional SP trace (post)
+    if (this.spTraceEnabled) {
+      const pcAfter = this.state.pc & 0xFFFF;
+      const pcv = pcBefore & 0xFFFF;
+      if ((pcv >= this.spTraceStart && pcv <= this.spTraceEnd) || (pcAfter >= this.spTraceStart && pcAfter <= this.spTraceEnd)) {
+        const cycDelta = (this.state.cycles | 0) - cycBeforeInstr;
+        try { /* eslint-disable no-console */ console.log(`[sp] post PC=$${pcAfter.toString(16).padStart(4,'0')} SP=$${this.state.s.toString(16).padStart(2,'0')} P=$${this.state.p.toString(16).padStart(2,'0')} dCYC=${cycDelta}`); /* eslint-enable no-console */ } catch {}
+      }
+    }
   }
 }

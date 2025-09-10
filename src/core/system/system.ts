@@ -27,7 +27,7 @@ export class NESSystem {
     const four = (flags6 & 0x08) !== 0; const vert = (flags6 & 0x01) !== 0;
     if (four) this.ppu.setMirroring('four'); else this.ppu.setMirroring(vert ? 'vertical' : 'horizontal');
     // Allow mapper (e.g., MMC3) to control nametable mirroring dynamically via A000 writes
-    if (mapper.setMirrorCallback) mapper.setMirrorCallback((mode: 'horizontal' | 'vertical') => this.ppu.setMirroring(mode));
+    if (mapper.setMirrorCallback) mapper.setMirrorCallback((mode: any) => this.ppu.setMirroring(mode));
     if (mapper.setTimeProvider) mapper.setTimeProvider(() => ({ frame: this.ppu.frame, scanline: this.ppu.scanline, cycle: this.ppu.cycle }));
     if (mapper.setCtrlProvider) mapper.setCtrlProvider(() => {
       // Provide an 'effective' ctrl for mapper telemetry that reflects which plane would drive $1000 pulses
@@ -52,6 +52,14 @@ export class NESSystem {
 
     // Attach APU
     this.apu = new APU();
+    // Configure region/timing from NES 2.0 if available
+    try {
+      const timing = (rom as any).timing as ('ntsc'|'pal'|'multi'|'dendy') | undefined;
+      const regionPpu = timing ? (timing === 'multi' ? 'ntsc' : timing) : 'ntsc';
+      this.ppu.setRegion(regionPpu);
+      const regionApu = (timing === 'pal') ? 'PAL' : 'NTSC';
+      this.apu.setRegion(regionApu as any);
+    } catch {}
     this.apu.reset();
     // Optional: allow fractional APU frame timing via env var (for precise CLI latency/IRQ tests)
     try {
@@ -158,6 +166,8 @@ export class NESSystem {
       // Aggregate ticks for efficiency
       this.ppu.tick(cycles * 3);
       this.apu.tick(cycles);
+      const mapperAny: any = (this.cart as any).mapper;
+      if (mapperAny && typeof mapperAny.tick === 'function') mapperAny.tick(cycles);
     });
 
     // Execute one CPU instruction; all cycles (bus + internal) will tick PPU/APU via the per-cycle hook.
@@ -171,9 +181,11 @@ export class NESSystem {
         const stall = (this.apu as any)?.consumeDmcStallCycles?.() | 0;
         if (stall > 0) {
           this.cpu.addCycles(stall);
-          // Keep PPU/APU in sync during stall
+          // Keep PPU/APU/mapper in sync during stall
           this.ppu.tick(stall * 3);
           this.apu.tick(stall);
+          const mapperAny: any = (this.cart as any).mapper;
+          if (mapperAny && typeof mapperAny.tick === 'function') mapperAny.tick(stall);
         }
       }
     } catch {}

@@ -29,7 +29,7 @@ function readText(sys: NESSystem, addr = TEXT_ADDR, max = 512): string {
   return s;
 }
 
-function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: number) {
+function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: number, wallTimeoutMs?: number) {
   const buf = new Uint8Array(fs.readFileSync(romPath));
   const rom = parseINes(buf);
   (process as any).env.DISABLE_APU_IRQ = '1';
@@ -39,6 +39,7 @@ function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: nu
 
   const start = sys.cpu.state.cycles;
   const deadline = start + timeoutCycles;
+  const wallDeadline = Date.now() + (wallTimeoutMs ?? Number.parseInt(process.env.MMC3_WALL_TIMEOUT_MS || '300000', 10));
   let sigSeen = false;
   let scheduledResetAt: number | null = null;
 
@@ -53,7 +54,9 @@ function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: nu
       continue;
     }
 
-    if (!sigSeen) continue;
+    if (!sigSeen) { if (Date.now() >= wallDeadline) break; continue; }
+
+    if (Date.now() >= wallDeadline) break;
 
     const status = sys.bus.read(STATUS_ADDR);
     if (status === 0x80) continue;
@@ -77,15 +80,21 @@ function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: nu
 }
 
 describe('MMC3: 4-scanline_timing.nes only', () => {
-  it('should pass', () => {
+  it('should pass', { timeout: Number.parseInt(process.env.MMC3_WALL_TIMEOUT_MS || '300000', 10) }, () => {
     const dir = path.resolve(process.env.MMC3_DIR || 'roms/nes-test-roms/mmc3_test');
     const hz = Number.parseInt(process.env.MMC3_CPU_HZ || '1789773', 10);
-    const timeoutCycles = Number.parseInt(process.env.MMC3_TIMEOUT_CYCLES || '250000000', 10);
+    const wallMs = Number.parseInt(process.env.MMC3_WALL_TIMEOUT_MS || '300000', 10);
+    const timeoutCycles = (() => {
+      const cyc = process.env.MMC3_TIMEOUT_CYCLES;
+      if (cyc && /^\d+$/.test(cyc)) return Number.parseInt(cyc, 10);
+      const secs = Number.parseInt(process.env.MMC3_TIMEOUT_SECONDS || '60', 10);
+      return Math.max(1, Math.floor(hz * secs));
+    })();
     const resetDelayCycles = Math.floor(hz * 0.100);
     const rom = path.join(dir, '4-scanline_timing.nes');
     expect(fs.existsSync(rom), `Missing ROM: ${rom}`).toBe(true);
 
-    const res = runMmc3Rom(rom, timeoutCycles, resetDelayCycles);
+    const res = runMmc3Rom(rom, timeoutCycles, resetDelayCycles, wallMs);
     if (res.status !== 0) {
       const a12 = res.a12Trace ?? [];
       const mmc3 = res.mmc3Trace ?? [];
@@ -128,15 +137,15 @@ describe('MMC3: 4-scanline_timing.nes only', () => {
         const hits: IRQHit[] = [];
         for (const idx of e001Idxs) {
           const e001 = arr[idx];
-          // find next IRQ at scanline 0 within next few hundred entries
+          // find next IRQ at scanline 0 after E001 (scan to end; robust to truncation)
           let hit: any = null;
-          for (let j = idx+1; j < Math.min(arr.length, idx+400); j++) {
+          for (let j = idx+1; j < arr.length; j++) {
             const e = arr[j];
             if (e.type==='IRQ' && e.s===0) { hit = e; break; }
           }
-          // find first A12 on scanline 0 after E001
+          // find first A12 on scanline 0 after E001 (scan to end; robust to truncation)
           let firstA12s0: any = null;
-          for (let j = idx+1; j < Math.min(arr.length, idx+400); j++) {
+          for (let j = idx+1; j < arr.length; j++) {
             const e = arr[j];
             if (e.type==='A12' && e.s===0) { firstA12s0 = e; break; }
           }
@@ -166,11 +175,19 @@ describe('MMC3: 4-scanline_timing.nes only', () => {
         const firstBg = hits.find(h=>h.mode==='bg10');
         if (firstSp || firstBg) {
           // eslint-disable-next-line no-console
-          console.error(`[4-scanline DEBUG] paired first-s0 IRQs by mode: sp08=${firstSp?`f${firstSp.f}s${firstSp.s}c${firstSp.c}`:'(none)'} bg10=${firstBg?`f${firstBg.f}s${firstBg.s}c${firstBg.c}`:'(none)'}`);
+          console.error(`[4-scanline DEBUG] paired first-s0 IRQs by mode: sp08=${firstSp?`f${firstSp.f}s${firstSp.s}c${firstSp.c}`:'(none)'} bg10=${firstBg?`f${firstBg.f}s${firstBg.s}c${firstBg.c}`:'(none)'} (scanned-to-end)`);
           if (firstSp && firstBg) {
             // eslint-disable-next-line no-console
             console.error(`[4-scanline DEBUG] comparison: sp08.c(${firstSp.c}) ${firstSp.c<firstBg.c?'<':'>'} bg10.c(${firstBg.c})`);
           }
+        }
+
+        // Fallback path if no E001 present in trace: report earliest s0 IRQ/A12 overall
+        if (!e001Idxs.length) {
+          const earliestS0Irq = arr.find((e: any)=> e.type==='IRQ' && e.s===0);
+          const earliestS0A12 = arr.find((e: any)=> e.type==='A12' && e.s===0);
+          // eslint-disable-next-line no-console
+          console.error(`[4-scanline DEBUG] fallback(no-E001-in-trace): earliest s0 IRQ=${earliestS0Irq?`f${earliestS0Irq.f}s${earliestS0Irq.s}c${earliestS0Irq.c}`:'(none)'} earliest s0 A12=${earliestS0A12?`f${earliestS0A12.f}s${earliestS0A12.s}c${earliestS0A12.c}`:'(none)'} `);
         }
         // Also classify by PPUMASK at the time of the hit (bg-only vs sp-only)
         const maskTrace = mask as any[];

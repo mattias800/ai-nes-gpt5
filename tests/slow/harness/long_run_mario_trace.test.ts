@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { NESSystem } from '@core/system/system';
 import { parseINes } from '@core/cart/ines';
+import { mkWallDeadline, hitWall, vitestTimeout } from '../../helpers/walltime';
 
 (function loadDotEnv(){
   try {
@@ -33,7 +34,7 @@ function findLocalRom(): string | null {
 }
 
 describe.skipIf(!findLocalRom())('Long-run Mario with CPU trace (optional)', () => {
-  it('runs ~600 frames and logs a limited instruction trace for debugging', () => {
+  it('runs ~600 frames and logs a limited instruction trace for debugging', { timeout: vitestTimeout('HARNESS_WALL_TIMEOUT_MS', 600000) }, () => {
     const romPath = findLocalRom()!;
     const rom = parseINes(new Uint8Array(fs.readFileSync(romPath)));
     const sys = new NESSystem(rom);
@@ -60,8 +61,12 @@ describe.skipIf(!findLocalRom())('Long-run Mario with CPU trace (optional)', () 
     const target = start + 600;
     let steps = 0;
     const hardCap = 200_000_000;
-    while (sys.ppu.frame < target && steps < hardCap) { sys.stepInstruction(); steps++; }
-    if (steps >= hardCap) throw new Error('Trace long-run timed out');
+    const wallDeadline = mkWallDeadline('HARNESS_WALL_TIMEOUT_MS', 600000);
+    while (sys.ppu.frame < target && steps < hardCap) {
+      sys.stepInstruction(); steps++;
+      if (hitWall(wallDeadline)) break;
+    }
+    if (sys.ppu.frame < target) throw new Error('Trace long-run timed out (wall or steps cap)');
 
     expect(sys.ppu.frame).toBeGreaterThanOrEqual(target);
   });

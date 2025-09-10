@@ -73,7 +73,7 @@ async function writePng(pathOut: string, fb: Uint8Array, w = 256, h = 240) {
 }
 
 describe.skipIf(!findLocalRom())('Screenshot harness (optional)', () => {
-  it('renders background-only and full-frame PNGs after N frames', async () => {
+  it('renders background-only and full-frame PNGs after N frames', { timeout: Number.parseInt(process.env.HARNESS_WALL_TIMEOUT_MS || '180000', 10) }, async () => {
     const romPath = findLocalRom()!;
     const rom = parseINes(new Uint8Array(fs.readFileSync(romPath)));
     const sys = new NESSystem(rom);
@@ -85,7 +85,13 @@ describe.skipIf(!findLocalRom())('Screenshot harness (optional)', () => {
     // Run some frames to reach a stable screen
     const frames = parseInt(process.env.SCREENSHOT_FRAMES || '60', 10);
     const start = sys.ppu.frame;
-    while (sys.ppu.frame < start + frames) sys.stepInstruction();
+    const wallMs = Number.parseInt(process.env.HARNESS_WALL_TIMEOUT_MS || '180000', 10);
+    const wallDeadline = Date.now() + wallMs;
+    while (sys.ppu.frame < start + frames) {
+      sys.stepInstruction();
+      if (Date.now() >= wallDeadline) break;
+    }
+    if (sys.ppu.frame < start + frames) throw new Error('Screenshot run timed out (wall)');
 
     // Background-only
     const bg = (sys.ppu as any).renderBgFrame() as Uint8Array;

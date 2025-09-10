@@ -147,6 +147,7 @@ export class APU {
   }
 
   public setRegion(region: Region) { this.region = region; this.recalcFrameEdges(); }
+  public getRegion(): Region { return this.region; }
   public setFrameTimingMode(mode: 'integer' | 'fractional') { this.frameTimingMode = mode; this.recalcFrameEdges(); }
 
   reset() {

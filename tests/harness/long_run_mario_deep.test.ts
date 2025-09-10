@@ -4,6 +4,7 @@ import path from 'node:path';
 import { NESSystem } from '@core/system/system';
 import { parseINes } from '@core/cart/ines';
 import { crc32 } from '@utils/crc32';
+import { mkWallDeadline, hitWall, vitestTimeout } from '../helpers/walltime';
 
 (function loadDotEnv(){
   try {
@@ -36,7 +37,7 @@ function findLocalRom(): string | null {
 const LONG_RUN = !!(process.env.LONG_RUN && process.env.LONG_RUN !== '0');
 
 describe.skipIf(!findLocalRom() || !LONG_RUN)('Long-run Mario integration (deep, optional)', () => {
-  it('runs ~600 frames and computes a stable state CRC', () => {
+  it('runs ~600 frames and computes a stable state CRC', { timeout: vitestTimeout('HARNESS_WALL_TIMEOUT_MS', 600000) }, () => {
     const romPath = findLocalRom()!;
     const rom = parseINes(new Uint8Array(fs.readFileSync(romPath)));
     const sys = new NESSystem(rom);
@@ -49,8 +50,12 @@ describe.skipIf(!findLocalRom() || !LONG_RUN)('Long-run Mario integration (deep,
     const target = start + 600; // ~10 seconds
     let steps = 0;
     const maxSteps = 200_000_000; // generous cap
-    while (sys.ppu.frame < target && steps < maxSteps) { sys.stepInstruction(); steps++; }
-    if (steps >= maxSteps) throw new Error('Deep long-run frame render timed out');
+    const wallDeadline = mkWallDeadline('HARNESS_WALL_TIMEOUT_MS', 600000);
+    while (sys.ppu.frame < target && steps < maxSteps) {
+      sys.stepInstruction(); steps++;
+      if (hitWall(wallDeadline)) break;
+    }
+    if (sys.ppu.frame < target) throw new Error('Deep long-run frame render timed out (wall or steps cap)');
 
     // Snapshot state: vram + palette + chr (8KB)
     const vram = (sys.ppu as any)['vram'] as Uint8Array;

@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseINes } from '@core/cart/ines';
 import { NESSystem } from '@core/system/system';
+import { parseINes } from '@core/cart/ines';
 import { crc32 } from '@utils/crc32';
+import { mkWallDeadline, hitWall, vitestTimeout } from '../../helpers/walltime';
 
 (function loadDotEnv(){
   try {
@@ -77,7 +78,7 @@ function setButtons(io: NESSystem['io'], names: string[], down: boolean) {
 
 // Optional input-driven deterministic CRC for SMB3. Skipped if no ROM or script present.
 describe.skipIf(!findLocalSMB3() || !findScript())('SMB3 input-script framebuffer CRC (optional)', () => {
-  it('replays input script and checks/records baseline', () => {
+  it('replays input script and checks/records baseline', { timeout: vitestTimeout('HARNESS_WALL_TIMEOUT_MS', 600000) }, () => {
     const romPath = findLocalSMB3()!;
     const scriptPath = findScript()!;
     const { frames, steps } = parseScript(scriptPath);
@@ -94,6 +95,7 @@ describe.skipIf(!findLocalSMB3() || !findScript())('SMB3 input-script framebuffe
     const target = start + frames;
     let stepsCount = 0;
     const hardCap = frames * 600000; // generous cap
+    const wallDeadline = mkWallDeadline('HARNESS_WALL_TIMEOUT_MS', 600000);
 
     while (sys.ppu.frame < target && stepsCount < hardCap) {
       // Apply button changes at frame start
@@ -107,7 +109,10 @@ describe.skipIf(!findLocalSMB3() || !findScript())('SMB3 input-script framebuffe
       }
       sys.stepInstruction();
       stepsCount++;
+      if (hitWall(wallDeadline)) break;
     }
+
+    if (sys.ppu.frame < target) throw new Error('SMB3 input-script run timed out (wall or steps cap)');
 
     const fb: Uint8Array = (sys.ppu as any).getFrameBuffer();
     const hashHex = (crc32(fb) >>> 0).toString(16).padStart(8, '0');

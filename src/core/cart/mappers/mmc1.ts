@@ -5,7 +5,8 @@ import type { Mapper } from '../types';
 export class MMC1 implements Mapper {
   private prg: Uint8Array;
   private chr: Uint8Array;
-  private prgRam = new Uint8Array(0x2000);
+  private prgRam: Uint8Array;
+  private prgBatteryOffset = 0;
 
   private shift = 0x10; // bit4=1 indicates empty
   private control = 0x0C; // default
@@ -13,13 +14,20 @@ export class MMC1 implements Mapper {
   private chrBank1 = 0;
   private prgBank = 0;
 
-  constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0)) {
+  constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0), chrRamSize?: number, prgRamSize: number = 0x2000, prgNvramSize: number = 0) {
     this.prg = prg;
-    this.chr = chr.length ? chr : new Uint8Array(0x2000);
+    this.chr = chr.length ? chr : new Uint8Array(chrRamSize || 0x2000);
+    const total = Math.max(0, prgRamSize|0) + Math.max(0, prgNvramSize|0);
+    this.prgRam = new Uint8Array(total || 0x2000);
+    this.prgBatteryOffset = Math.max(0, prgRamSize|0);
   }
 
   cpuRead(addr: Word): Byte {
-    if (addr >= 0x6000 && addr < 0x8000) return this.prgRam[addr - 0x6000];
+    if (addr >= 0x6000 && addr < 0x8000) {
+      const i = addr - 0x6000;
+      if (i < this.prgRam.length) return this.prgRam[i];
+      return 0x00;
+    }
     if (addr >= 0x8000) {
       const off = this.mapPrg(addr);
       return this.prg[off];
@@ -27,7 +35,7 @@ export class MMC1 implements Mapper {
     return 0x00;
   }
   cpuWrite(addr: Word, value: Byte): void {
-    if (addr >= 0x6000 && addr < 0x8000) { this.prgRam[addr - 0x6000] = value & 0xFF; return; }
+    if (addr >= 0x6000 && addr < 0x8000) { const i = addr - 0x6000; if (i < this.prgRam.length) this.prgRam[i] = value & 0xFF; return; }
     if (addr < 0x8000) return;
 
     if (value & 0x80) {
@@ -51,6 +59,17 @@ export class MMC1 implements Mapper {
       }
       this.shift = 0x10;
     }
+  }
+
+  getBatteryRam(): Uint8Array | null {
+    const size = this.prgRam.length - this.prgBatteryOffset;
+    return size > 0 ? this.prgRam.slice(this.prgBatteryOffset) : null;
+  }
+  setBatteryRam(data: Uint8Array): void {
+    const size = this.prgRam.length - this.prgBatteryOffset;
+    if (size <= 0) return;
+    const n = Math.min(size, data.length);
+    this.prgRam.set(data.subarray(0, n), this.prgBatteryOffset);
   }
 
   ppuRead(addr: Word): Byte {

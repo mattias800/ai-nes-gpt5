@@ -64,6 +64,7 @@ async function main() {
     MAME_OUT: outPath,
     MAME_INST: String(Math.max(1, inst)),
     MAME_START: start,
+    MAME_INIT_AUTO: (process.env.MAME_INIT_AUTO ?? '1'),
   }
   // Allow TRACE_SECONDS to impose a max wait; otherwise default to generous timeout for stepping
   const durationMs = Math.max(10000, Math.floor((isFinite(seconds) && seconds > 0 ? seconds : 10) * 1000))

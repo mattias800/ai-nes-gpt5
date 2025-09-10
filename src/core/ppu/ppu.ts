@@ -75,6 +75,8 @@ export class PPU {
   // Offline renderFrame VT usage is opt-in via setTimingMode; env default does not flip this.
   private offlineUseVT = false;
 
+  private region: 'ntsc' | 'pal' | 'dendy' | 'multi' = 'ntsc';
+
   constructor(private mirror: MirrorMode = 'vertical') {
     try {
       // Allow default timing mode via env for tests
@@ -88,6 +90,8 @@ export class PPU {
   }
 
   setMirroring(mode: MirrorMode) { this.mirror = mode; }
+  setRegion(region: 'ntsc' | 'pal' | 'dendy' | 'multi') { this.region = region; }
+  getRegion(): 'ntsc' | 'pal' | 'dendy' | 'multi' { return this.region; }
 
   connectCHR(read: (addr: Word) => Byte, write: (addr: Word, value: Byte) => void) {
     this.chrRead = read; this.chrWrite = write;
@@ -327,13 +331,12 @@ export class PPU {
           // Latch fine X for VT sampling
           if (this.scanline >= 0 && this.scanline <= 239) this.latchedX = this.x & 0x07;
         }
-        const allowPhasePulses = this.uncondPulses || renderingEnabled;
-        // Sprite-phase pulse near dot ~260 if sprites use $1000 (8x16 sprites treated as using $1000)
+        const allowPhasePulses = renderingEnabled;
+        // Sprite-phase pulse near dot ~260: if sprites use $1000, emit and mark done. Otherwise, defer to bg phase.
         if (allowPhasePulses && this.cycle === 260) {
           const height16 = (this.ctrl & 0x20) !== 0;
           const spUses1000 = ((this.ctrl & 0x08) !== 0) || height16;
-          // Emit at sprite phase only if sprites select $1000
-          const emit = spUses1000;
+          const emit = (!this.linePulseDone && spUses1000);
           if (this.traceEnabled && this.scanline === 0) {
             if (this.phaseTrace.length > 256) this.phaseTrace.shift();
             this.phaseTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, ctrl: this.ctrl & 0xFF, mask: this.mask & 0xFF, emitted: emit });
@@ -342,15 +345,13 @@ export class PPU {
             this.a12DetectOverride = true; this.ppuRead(0x1000); this.a12DetectOverride = false;
             this.linePulseDone = true;
           } else {
+            // keep baseline low
             this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false;
           }
         }
-        // Background-phase pulse near dot ~324 if background uses $1000 and no sprite-phase pulse already
+        // Background-phase pulse near dot ~324: always emit exactly one rise per visible/prerender line when rendering enabled
         if (allowPhasePulses && this.cycle === 324) {
-          const bgUses1000Now = (this.ctrl & 0x10) !== 0;
-          const ctrlSel1000 = (this.ctrl & 0x18) !== 0;
-          // If neither plane selects $1000, emit at bg phase only in unconditional mode
-          const emit = (!this.linePulseDone && (bgUses1000Now || (this.uncondPulses && !ctrlSel1000)));
+          const emit = !this.linePulseDone;
           if (this.traceEnabled && this.scanline === 0) {
             if (this.phaseTrace.length > 256) this.phaseTrace.shift();
             this.phaseTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, ctrl: this.ctrl & 0xFF, mask: this.mask & 0xFF, emitted: emit });
@@ -502,6 +503,7 @@ export class PPU {
             this.oddFrame = false;
           }
           // start of new frame: status bits were cleared at pre-render; nothing to clear here
+          const wasVblank = (this.status & 0x80) !== 0;
           if (wasVblank) {
             try {
               const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
@@ -590,9 +592,20 @@ export class PPU {
     if (addr >= 0x2000) return;
     const a12 = (addr >> 12) & 1;
     if (a12 === 0) {
-      this.a12LastLowDot = this.dot;
+      // Update low timestamp only on high->low transitions; keep earlier low time during the low window
+      if (this.lastA12 !== 0) this.a12LastLowDot = this.dot;
+      this.lastA12 = 0;
+      try {
+        const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+        if (env && env.PPU_A12_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.log(`[ppu-a12] low at f=${this.frame} sl=${this.scanline} cyc=${this.cycle} addr=$${addr.toString(16).padStart(4,'0')}`);
+        }
+      } catch {}
+      return;
     }
-    if (this.lastA12 === 0 && a12 === 1) {
+    // a12===1: consider rising edge only if filtered conditions satisfied
+    if (this.lastA12 === 0) {
       if (force || (this.dot - this.a12LastLowDot >= this.a12Filter)) {
         if (this.traceEnabled) {
           if (this.traceA12.length > 1024) this.traceA12.shift();
@@ -606,9 +619,22 @@ export class PPU {
           }
         } catch {}
         this.onA12Rise && this.onA12Rise();
+        // Update filtered state to high only when a valid rise is counted
+        this.lastA12 = 1;
+      } else {
+        // Filtered out: keep filtered state low so a later valid rise can be detected
+        // (do not update lastA12 to 1 here)
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.PPU_A12_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.log(`[ppu-a12] filtered rise (ignored) at f=${this.frame} sl=${this.scanline} cyc=${this.cycle} addr=$${addr.toString(16).padStart(4,'0')}`);
+          }
+        } catch {}
       }
+    } else {
+      // Already high (filtered); nothing to do
     }
-    this.lastA12 = a12;
   }
 
   // Manual A12 evaluation when VRAM address (v) changes via CPU writes (e.g., $2006)

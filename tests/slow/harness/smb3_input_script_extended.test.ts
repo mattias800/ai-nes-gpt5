@@ -4,6 +4,7 @@ import path from 'node:path';
 import { parseINes } from '@core/cart/ines';
 import { NESSystem } from '@core/system/system';
 import { crc32 } from '@utils/crc32';
+import { mkWallDeadline, hitWall, vitestTimeout } from '../../helpers/walltime';
 
 (function loadDotEnv(){
   try {
@@ -99,7 +100,7 @@ function onFailureDump(sys: NESSystem, tag: string) {
 
 // Optional extended input-driven multi-checkpoint CRCs for SMB3. Skipped if no ROM.
 describe.skipIf(!findLocalSMB3())('SMB3 extended input-script CRC checkpoints (optional)', () => {
-  it('replays extended script and checks/records per-checkpoint CRCs', () => {
+  it('replays extended script and checks/records per-checkpoint CRCs', { timeout: vitestTimeout('HARNESS_WALL_TIMEOUT_MS', 900000) }, () => {
     const romPath = findLocalSMB3()!;
     const sp = scriptPath();
     const { frames, steps, checkpoints } = parseScript(sp);
@@ -131,6 +132,7 @@ describe.skipIf(!findLocalSMB3())('SMB3 extended input-script CRC checkpoints (o
     let stepIdx = 0;
     let stepsCount = 0;
     const hardCap = frames * 800000; // generous
+    const wallDeadline = mkWallDeadline('HARNESS_WALL_TIMEOUT_MS', 900000);
 
     try {
       while (sys.ppu.frame < target && stepsCount < hardCap) {
@@ -152,8 +154,9 @@ describe.skipIf(!findLocalSMB3())('SMB3 extended input-script CRC checkpoints (o
         }
         sys.stepInstruction();
         stepsCount++;
+        if (hitWall(wallDeadline)) break;
       }
-      if (stepsCount >= hardCap) throw new Error('SMB3 extended input run timed out');
+      if (sys.ppu.frame < target) throw new Error('SMB3 extended input run timed out (wall or steps cap)');
     } catch (e) {
       onFailureDump(sys, 'runtime-error');
       // eslint-disable-next-line no-console

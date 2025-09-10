@@ -28,6 +28,7 @@ const SIG0 = 0xde, SIG1 = 0xb0, SIG2 = 0x61;
 interface RunOpts {
   timeoutCycles: number;
   resetDelayCycles: number;
+  wallTimeoutMs?: number;
 }
 
 interface RunResult { status: number; message: string; cycles: number; debug?: { a12Trace: Array<{ frame: number; scanline: number; cycle: number }>; ctrlTrace: Array<{ frame: number; scanline: number; cycle: number; ctrl: number }>; maskTrace: Array<{ frame: number; scanline: number; cycle: number; mask: number }>; mmc3Trace: ReadonlyArray<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean, f?: number, s?: number, c?: number }> | null; lastStatus: number; lastMsg: string; sigSeen: boolean; } }
@@ -63,12 +64,14 @@ function runMmc3Rom(romPath: string, opts: RunOpts): RunResult {
 
   const start = sys.cpu.state.cycles;
   const deadline = start + opts.timeoutCycles;
+  const wallDeadline = Date.now() + (opts.wallTimeoutMs ?? Number.parseInt(process.env.MMC3_WALL_TIMEOUT_MS || '300000', 10));
 
   let sigSeen = false;
   let scheduledResetAt: number | null = null;
 
   while (sys.cpu.state.cycles < deadline) {
     sys.stepInstruction();
+    if (Date.now() >= wallDeadline) break;
 
     if (!sigSeen) sigSeen = hasSignature(sys);
 
@@ -119,6 +122,8 @@ function runMmc3Rom(romPath: string, opts: RunOpts): RunResult {
   const lastMsg = sigSeen ? readText(sys, TEXT_ADDR) : '';
   return { status: 0x7F, message: `[timeout] ${path.basename(romPath)}`, cycles: sys.cpu.state.cycles, debug: {
     a12Trace: sys.ppu.getA12Trace().slice(-32),
+    ctrlTrace: (sys.ppu as any).getCtrlTrace?.() ?? [],
+    maskTrace: (sys.ppu as any).getMaskTrace?.() ?? [],
     mmc3Trace: ((sys.cart as any).mapper && (typeof (sys.cart as any).mapper.getTrace === 'function')) ? (sys.cart as any).mapper.getTrace() : null,
     lastStatus: lastStatus,
     lastMsg: lastMsg,
@@ -127,11 +132,16 @@ function runMmc3Rom(romPath: string, opts: RunOpts): RunResult {
 }
 
 describe('MMC3 test suite', () => {
-  it('passes all sub-tests in order', () => {
+  it('passes all sub-tests in order', { timeout: Number.parseInt(process.env.MMC3_WALL_TIMEOUT_MS || '300000', 10) }, () => {
     const dir = path.resolve(process.env.MMC3_DIR || 'roms/nes-test-roms/mmc3_test');
     const includeMMC6 = (process.env.MMC3_INCLUDE_MMC6 ?? '1') === '1';
     const hz = Number.parseInt(process.env.MMC3_CPU_HZ || '1789773', 10);
-    const timeoutCycles = Number.parseInt(process.env.MMC3_TIMEOUT_CYCLES || '250000000', 10);
+    const timeoutCycles = (() => {
+      const cyc = process.env.MMC3_TIMEOUT_CYCLES;
+      if (cyc && /^\d+$/.test(cyc)) return Number.parseInt(cyc, 10);
+      const secs = Number.parseInt(process.env.MMC3_TIMEOUT_SECONDS || '60', 10);
+      return Math.max(1, Math.floor(hz * secs));
+    })();
     const resetDelayCycles = Math.floor(hz * 0.100);
 
     const files = [
@@ -148,7 +158,7 @@ describe('MMC3 test suite', () => {
 
     for (const f of files) {
       const p = path.join(dir, f);
-      const res = runMmc3Rom(p, { timeoutCycles, resetDelayCycles });
+      const res = runMmc3Rom(p, { timeoutCycles, resetDelayCycles, wallTimeoutMs: Number.parseInt(process.env.MMC3_WALL_TIMEOUT_MS || '300000', 10) });
       if (res.status !== 0) {
         const a12 = res.debug?.a12Trace ?? [];
         const mmc3 = res.debug?.mmc3Trace ?? [];

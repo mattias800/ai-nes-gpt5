@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { NESSystem } from '@core/system/system';
 import { parseINes } from '@core/cart/ines';
+import { mkWallDeadline, hitWall, vitestTimeout } from '../../helpers/walltime';
 
 (function loadDotEnv(){
   try {
@@ -42,7 +43,7 @@ function findLocalSMB3(): string | null {
 // Optional, ROM-gated test: verify SMB3 triggers MMC3 IRQ at least once under rendering
 // Focused on invariant presence, not exact counts.
 describe.skipIf(!findLocalSMB3())('SMB3 IRQ presence invariant (optional)', () => {
-  it('observes MMC3 writes, A12 rises, and at least one IRQ service', () => {
+  it('observes MMC3 writes, A12 rises, and at least one IRQ service', { timeout: vitestTimeout('HARNESS_WALL_TIMEOUT_MS', 600000) }, () => {
     const romPath = findLocalSMB3()!;
     const rom = parseINes(new Uint8Array(fs.readFileSync(romPath)));
 
@@ -71,6 +72,7 @@ describe.skipIf(!findLocalSMB3())('SMB3 IRQ presence invariant (optional)', () =
     const target = startF + frames;
     const hardCap = frames * 1_000_000;
     let steps = 0;
+    const wallDeadline = mkWallDeadline('HARNESS_WALL_TIMEOUT_MS', 600000);
 
     const ring: string[] = [];
     (sys.cpu as any).setTraceHook((pc: number, op: number) => {
@@ -82,6 +84,7 @@ describe.skipIf(!findLocalSMB3())('SMB3 IRQ presence invariant (optional)', () =
       while (sys.ppu.frame < target && steps < hardCap) {
         sys.stepInstruction();
         steps++;
+        if (hitWall(wallDeadline)) break;
         if (sys.cpu.state.pc === irqVec) irqServiced++;
         if (mapper && typeof mapper.getTrace === 'function') {
           const t = mapper.getTrace();
@@ -96,7 +99,7 @@ describe.skipIf(!findLocalSMB3())('SMB3 IRQ presence invariant (optional)', () =
           }
         }
       }
-      if (steps >= hardCap) throw new Error('SMB3 IRQ presence run timed out');
+      if (sys.ppu.frame < target) throw new Error('SMB3 IRQ presence run timed out (wall or steps cap)');
     } catch (e) {
       try {
         const fb: Uint8Array = (sys.ppu as any).getFrameBuffer();

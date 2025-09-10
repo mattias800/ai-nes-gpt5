@@ -32,9 +32,9 @@ export class MMC2 implements Mapper {
   private prg16kBanks: number;
   private chr4kBanks: number;
 
-  constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0)) {
+  constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0), chrRamSize?: number) {
     this.prg = prg;
-    this.chr = chr.length ? chr : new Uint8Array(0x2000); // CHR RAM if none
+    this.chr = chr.length ? chr : new Uint8Array(chrRamSize || 0x2000); // CHR RAM if none
     this.prg16kBanks = Math.max(1, this.prg.length >>> 14);
     this.chr4kBanks = Math.max(1, this.chr.length >>> 12);
   }

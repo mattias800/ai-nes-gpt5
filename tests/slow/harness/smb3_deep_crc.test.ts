@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseINes } from '@core/cart/ines';
 import { NESSystem } from '@core/system/system';
+import { parseINes } from '@core/cart/ines';
 import { crc32 } from '@utils/crc32';
+import { mkWallDeadline, hitWall, vitestTimeout } from '../../helpers/walltime';
 
 (function loadDotEnv(){
   try {
@@ -53,7 +54,7 @@ function writeBaselines(b: any) {
 
 // Optional deep run (~600 frames) for SMB3 determinism; skipped if no ROM present.
 describe.skipIf(!findLocalSMB3())('SMB3 deep framebuffer CRC (optional)', () => {
-  it('runs ~600 frames and checks baseline store', () => {
+  it('runs ~600 frames and checks baseline store', { timeout: vitestTimeout('HARNESS_WALL_TIMEOUT_MS', 600000) }, () => {
     const romPath = findLocalSMB3()!;
     const rom = parseINes(new Uint8Array(fs.readFileSync(romPath)));
     const sys = new NESSystem(rom);
@@ -67,8 +68,12 @@ describe.skipIf(!findLocalSMB3())('SMB3 deep framebuffer CRC (optional)', () => 
     const target = start + frames;
     let steps = 0;
     const hardCap = 200_000_000; // generous
-    while (sys.ppu.frame < target && steps < hardCap) { sys.stepInstruction(); steps++; }
-    if (steps >= hardCap) throw new Error('SMB3 deep CRC run timed out');
+    const wallDeadline = mkWallDeadline('HARNESS_WALL_TIMEOUT_MS', 600000);
+    while (sys.ppu.frame < target && steps < hardCap) {
+      sys.stepInstruction(); steps++;
+      if (hitWall(wallDeadline)) break;
+    }
+    if (sys.ppu.frame < target) throw new Error('SMB3 deep CRC run timed out (wall or steps cap)');
 
     const fb = (sys.ppu as any).getFrameBuffer() as Uint8Array;
     const hashHex = (crc32(fb) >>> 0).toString(16).padStart(8,'0');

@@ -45,7 +45,12 @@ async function main() {
   let start = process.env.START || process.env.NESTEST_START || ''
   if (process.env.START && /^(reset|none)$/i.test(process.env.START)) start = ''
   const outDir = path.resolve('out')
-  const outPath = path.join(outDir, 'external-mame.log')
+  let outPath = path.join(outDir, 'external-mame.log')
+  // Allow overriding output path via OUT or MAME_OUT env
+  try {
+    const override = process.env.OUT || process.env.MAME_OUT
+    if (override && override.length > 0) outPath = path.resolve(override)
+  } catch {}
   const pidFile = path.join(outDir, 'external-mame.pid')
   const lua = path.resolve('scripts/external/mame_trace.lua')
   fs.mkdirSync(outDir, { recursive: true })

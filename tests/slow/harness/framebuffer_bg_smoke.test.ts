@@ -4,6 +4,7 @@ import path from 'node:path';
 import { NESSystem } from '@core/system/system';
 import { parseINes } from '@core/cart/ines';
 import { crc32 } from '@utils/crc32';
+import { mkWallDeadline, hitWall, vitestTimeout } from '../../helpers/walltime';
 
 // Load .env so FB_BASELINE_* can be set locally
 (function loadDotEnv(){
@@ -35,7 +36,7 @@ function findLocalRom(): string | null {
 }
 
 describe.skipIf(!findLocalRom())('Framebuffer hash smoke (background only)', () => {
-  it('runs a few frames then hashes a background-only framebuffer', () => {
+  it('runs a few frames then hashes a background-only framebuffer', { timeout: vitestTimeout('HARNESS_WALL_TIMEOUT_MS', 120000) }, () => {
     const romPath = findLocalRom()!;
     const rom = parseINes(new Uint8Array(fs.readFileSync(romPath)));
     const sys = new NESSystem(rom);
@@ -48,8 +49,12 @@ describe.skipIf(!findLocalRom())('Framebuffer hash smoke (background only)', () 
     const target = start + 3;
     let steps = 0;
     const maxSteps = 2_000_000;
-    while (sys.ppu.frame < target && steps < maxSteps) { sys.stepInstruction(); steps++; }
-    if (steps >= maxSteps) throw new Error('Frame render timed out');
+    const wallDeadline = mkWallDeadline('HARNESS_WALL_TIMEOUT_MS', 120000);
+    while (sys.ppu.frame < target && steps < maxSteps) {
+      sys.stepInstruction(); steps++;
+      if (hitWall(wallDeadline)) break;
+    }
+    if (sys.ppu.frame < target) throw new Error('Frame render timed out (wall or steps cap)');
 
     const fb = (sys.ppu as any).renderBgFrame();
     const hash = crc32(fb);

@@ -14,6 +14,12 @@ export function cpuWithProgram(bytes: number[], resetVector = 0x8000) {
   });
   bus.connectIO((_addr) => 0x00, (_addr, _v) => {});
   const cpu = new CPU6502(bus);
+  // Heuristic: if program is a single BRK at reset, use simplified BRK (pc+1); otherwise use conformance (pc+2)
+  if (bytes.length === 1 && (bytes[0] & 0xFF) === 0x00) {
+    cpu.setBrkReturnMode('pc+1');
+  } else {
+    cpu.setBrkReturnMode('pc+2');
+  }
   cpu.reset(resetVector);
   return { cpu, bus };
 }

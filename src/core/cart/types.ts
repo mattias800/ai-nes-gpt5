@@ -9,7 +9,11 @@ export interface Mapper {
   irqPending?(): boolean; // For mappers with IRQs (e.g., MMC3)
   clearIrq?(): void;
   notifyA12Rise?(): void; // Call when PPU A12 rises (MMC3)
-  setMirrorCallback?(cb: (mode: 'horizontal' | 'vertical') => void): void; // Optional: mapper-controlled mirroring
+  // Optional: mapper-controlled mirroring (support one-screen for AxROM)
+  setMirrorCallback?(cb: (mode: 'horizontal' | 'vertical' | 'single0' | 'single1') => void): void;
+  // Optional battery-backed RAM accessors (PRG NVRAM)
+  getBatteryRam?(): Uint8Array | null;
+  setBatteryRam?(data: Uint8Array): void;
 }
 
 export interface CartWires {

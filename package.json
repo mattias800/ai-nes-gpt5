@@ -34,6 +34,8 @@
     "dump:wav": "tsx -r tsconfig-paths/register scripts/dump-wav.ts",
     "nestest:fetch": "node scripts/fetch-nestest-assets.mjs",
     "nestest:validate:canonical": "node scripts/validate-nestest-log.mjs roms/nestest.log",
+    "battery:export": "tsx -r tsconfig-paths/register scripts/battery-export.ts",
+    "battery:import": "tsx -r tsconfig-paths/register scripts/battery-import.ts",
     "trace:rom": "tsx -r tsconfig-paths/register scripts/trace-rom.ts",
     "compare:log": "tsx -r tsconfig-paths/register scripts/compare-against-log.ts",
     "trace:external": "node scripts/generate-trace-fceux.mjs",
@@ -42,9 +44,12 @@
     "compare:mame": "npm run compare:log -- --log=out/external-mame.log",
     "trace:mame:regs": "node scripts/generate-trace-mame-regs.mjs",
     "compare:mame:regs": "npm run compare:log -- --log=out/external-mame-regs.log",
+    "trace:mame:nestest-auto": "START=C000 OUT=out/nestest-mame-auto.log node scripts/generate-trace-mame.mjs",
+    "compare:mame:auto": "npm run compare:log -- --log=out/nestest-mame-auto.log",
     "mame:dump": "node scripts/generate-mame-dump.mjs",
     "mario:sync": "node scripts/chain-mario-compare.mjs",
-    "nestest:sync": "node scripts/chain-nestest-compare.mjs"
+    "nestest:sync": "node scripts/chain-nestest-compare.mjs",
+    "scan:roms": "tsx -r tsconfig-paths/register scripts/scan-roms.ts --dir=${ROM_DIR:-roms}"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",

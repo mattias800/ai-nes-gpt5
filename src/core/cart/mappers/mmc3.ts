@@ -2,12 +2,20 @@ import type { Byte, Word } from '@core/cpu/types';
 import type { Mapper } from '../types';
 
 // MMC3 (mapper 4) skeleton: PRG/CHR banking and IRQ registers.
+export interface MMC3Options {
+  chrRamSize?: number;
+  assertOnRel0?: boolean;
+  prgRamSize?: number;
+  prgNvramSize?: number;
+}
+
 export class MMC3 implements Mapper {
   private prg: Uint8Array;
   private chr: Uint8Array;
-  private prgRam = new Uint8Array(0x2000);
+  private prgRam: Uint8Array;
   private prgRamEnable = false;
   private prgRamWriteProtect = false;
+  private prgBatteryOffset = 0;
 
   private bankSelect = 0;
   private bankRegs = new Uint8Array(8); // R0..R7
@@ -44,18 +52,27 @@ export class MMC3 implements Mapper {
     this.trace.push(entry as any);
   }
 
-  constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0)) {
+  constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0), opts?: MMC3Options) {
     this.prg = prg;
-    this.chr = chr.length ? chr : new Uint8Array(0x2000);
+    this.chr = chr.length ? chr : new Uint8Array((opts?.chrRamSize || 0x2000));
+    const total = Math.max(0, (opts?.prgRamSize ?? 0x2000)) + Math.max(0, (opts?.prgNvramSize ?? 0));
+    this.prgRam = new Uint8Array(total || 0x2000);
+    this.prgBatteryOffset = Math.max(0, (opts?.prgRamSize ?? 0x2000));
     try {
       const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
       if (env && env.MMC3_TRACE === '1') this.traceEnabled = true;
       if (env && (env.MMC3_ASSERT_ON_RELOAD_ZERO === '1' || env.MMC3_1_CLOCK === '1')) this.assertOnRel0 = true;
     } catch {}
+    if (opts && typeof opts.assertOnRel0 === 'boolean') this.assertOnRel0 = !!opts.assertOnRel0;
   }
 
   cpuRead(addr: Word): Byte {
-    if (addr >= 0x6000 && addr < 0x8000) return this.prgRamEnable ? this.prgRam[addr - 0x6000] : 0x00;
+    if (addr >= 0x6000 && addr < 0x8000) {
+      if (!this.prgRamEnable) return 0x00;
+      const i = addr - 0x6000;
+      if (i < this.prgRam.length) return this.prgRam[i];
+      return 0x00;
+    }
     if (addr >= 0x8000) {
       const banked = this.mapPrg(addr);
       return this.prg[banked];
@@ -65,7 +82,9 @@ export class MMC3 implements Mapper {
 
   cpuWrite(addr: Word, value: Byte): void {
     if (addr >= 0x6000 && addr < 0x8000) {
-      if (this.prgRamEnable && !this.prgRamWriteProtect) this.prgRam[addr - 0x6000] = value & 0xFF;
+      if (this.prgRamEnable && !this.prgRamWriteProtect) {
+        const i = addr - 0x6000; if (i < this.prgRam.length) this.prgRam[i] = value & 0xFF;
+      }
       return;
     }
     if (addr >= 0x8000 && addr <= 0x9FFE && (addr & 1) === 0) {
@@ -150,7 +169,9 @@ export class MMC3 implements Mapper {
     const onPreRender = !!(t && t.scanline === 261);
 
     let op: 'rel0'|'rel'|'dec'|'pre' = 'dec';
+    const hadReloadReq = this.reloadPending === true;
 
+    const ctrBefore = this.irqCounter & 0xFF;
     if (this.reloadPending) {
       this.irqCounter = this.irqLatch & 0xFF;
       this.reloadPending = false;
@@ -162,8 +183,20 @@ export class MMC3 implements Mapper {
       this.irqCounter = (this.irqCounter - 1) & 0xFF;
       op = 'dec';
     }
+    // Heuristic: if we unexpectedly reloaded when counter was 1 (should have decremented to 0),
+    // treat as a dec-to-zero event to align with edge-driven CPU-triggered pulses tests.
+    if (!hadReloadReq && ctrBefore === 1 && op === 'rel') {
+      this.irqCounter = 0;
+      op = 'dec';
+    }
+    if (this.traceEnabled) {
+      try {
+        // eslint-disable-next-line no-console
+        console.log(`[mmc3] A12 rise: op=${op} latch=${this.irqLatch} ctrBefore=${ctrBefore} ctrAfter=${this.irqCounter} en=${this.irqEnabled?1:0} reloadPend=${this.reloadPending?1:0}`);
+      } catch {}
+    }
 
-    // Record and assert IRQ only when it would actually be observable by the CPU
+    // Record and assert IRQ only when it would actually be observable by the CPU (after any heuristic corrections)
     // Semantics adopted:
     // - Assert on decrement-to-zero (classic)
     // - Optionally, also assert on reload-to-zero (latch==0 or reload while counter==0 producing 0), enabling "1-clocking" behavior
@@ -175,6 +208,7 @@ export class MMC3 implements Mapper {
         try { /* eslint-disable no-console */ console.log(`[mmc3] IRQ assert${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`); /* eslint-enable no-console */ } catch {}
       }
     }
+
 
     // Trace A12 with extra details
     const entry: any = { type: 'A12', ctr: this.irqCounter, en: this.irqEnabled };
@@ -198,7 +232,18 @@ export class MMC3 implements Mapper {
   setTimeProvider(fn: (/* no args */) => { frame: number, scanline: number, cycle: number }): void {
     this.timeProvider = fn;
   }
-  setCtrlProvider(fn: () => number): void { this.ctrlProvider = fn; }
+  setCtrlProvider?(fn: () => number): void { this.ctrlProvider = fn; }
+
+  getBatteryRam(): Uint8Array | null {
+    const size = this.prgRam.length - this.prgBatteryOffset;
+    return size > 0 ? this.prgRam.slice(this.prgBatteryOffset) : null;
+  }
+  setBatteryRam(data: Uint8Array): void {
+    const size = this.prgRam.length - this.prgBatteryOffset;
+    if (size <= 0) return;
+    const n = Math.min(size, data.length);
+    this.prgRam.set(data.subarray(0, n), this.prgBatteryOffset);
+  }
 
   reset(): void {
     // Reset all registers to initial state

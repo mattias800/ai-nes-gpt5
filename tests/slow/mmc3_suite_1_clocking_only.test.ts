@@ -29,7 +29,7 @@ function readText(sys: NESSystem, addr = TEXT_ADDR, max = 512): string {
   return s;
 }
 
-function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: number) {
+function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: number, wallTimeoutMs?: number) {
   const buf = new Uint8Array(fs.readFileSync(romPath));
   const rom = parseINes(buf);
   (process as any).env.DISABLE_APU_IRQ = '1';
@@ -39,6 +39,7 @@ function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: nu
 
   const start = sys.cpu.state.cycles;
   const deadline = start + timeoutCycles;
+  const wallDeadline = Date.now() + (wallTimeoutMs ?? Number.parseInt(process.env.MMC3_WALL_TIMEOUT_MS || '180000', 10));
   let sigSeen = false;
   let scheduledResetAt: number | null = null;
 
@@ -53,7 +54,9 @@ function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: nu
       continue;
     }
 
-    if (!sigSeen) continue;
+    if (!sigSeen) { if (Date.now() >= wallDeadline) break; continue; }
+
+    if (Date.now() >= wallDeadline) break;
 
     const status = sys.bus.read(STATUS_ADDR);
     if (status === 0x80) continue;
@@ -77,15 +80,21 @@ function runMmc3Rom(romPath: string, timeoutCycles: number, resetDelayCycles: nu
 }
 
 describe('MMC3: 1-clocking.nes only', () => {
-  it('should pass', () => {
+  it('should pass', { timeout: Number.parseInt(process.env.MMC3_WALL_TIMEOUT_MS || '180000', 10) }, () => {
     const dir = path.resolve(process.env.MMC3_DIR || 'roms/nes-test-roms/mmc3_test');
     const hz = Number.parseInt(process.env.MMC3_CPU_HZ || '1789773', 10);
-    const timeoutCycles = Number.parseInt(process.env.MMC3_TIMEOUT_CYCLES || '25000000', 10);
+    const wallMs = Number.parseInt(process.env.MMC3_WALL_TIMEOUT_MS || '180000', 10);
+    const timeoutCycles = (() => {
+      const cyc = process.env.MMC3_TIMEOUT_CYCLES;
+      if (cyc && /^\d+$/.test(cyc)) return Number.parseInt(cyc, 10);
+      const secs = Number.parseInt(process.env.MMC3_TIMEOUT_SECONDS || '60', 10);
+      return Math.max(1, Math.floor(hz * secs));
+    })();
     const resetDelayCycles = Math.floor(hz * 0.100);
     const rom = path.join(dir, '1-clocking.nes');
     expect(fs.existsSync(rom), `Missing ROM: ${rom}`).toBe(true);
 
-    const res = runMmc3Rom(rom, timeoutCycles, resetDelayCycles);
+    const res = runMmc3Rom(rom, timeoutCycles, resetDelayCycles, wallMs);
     if (res.status !== 0) {
       const a12 = res.a12Trace ?? [];
       const mmc3 = res.mmc3Trace ?? [];

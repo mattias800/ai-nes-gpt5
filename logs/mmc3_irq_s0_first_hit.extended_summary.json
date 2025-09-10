@@ -1,0 +1,9 @@
+{
+  "eIdx": 1038,
+  "s0Idx": 1046,
+  "s0Line": "[mmc3] IRQ assert @[f33s0c324]",
+  "irqBetweenCount": 0,
+  "irqFromS0Count": 60,
+  "a12BeforeTailCount": 80,
+  "a12BetweenCount": 2
+}

@@ -1,0 +1,2 @@
+[mmc3] A12 rise: op=rel latch=1 ctrBefore=0 ctrAfter=1 en=1 reloadPend=0
+[mmc3] A12 rise: op=dec latch=1 ctrBefore=1 ctrAfter=0 en=1 reloadPend=0

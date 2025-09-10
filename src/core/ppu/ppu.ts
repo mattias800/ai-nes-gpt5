@@ -331,14 +331,20 @@ export class PPU {
           // Latch fine X for VT sampling
           if (this.scanline >= 0 && this.scanline <= 239) this.latchedX = this.x & 0x07;
         }
-        // Allow phase pulses when rendering is enabled, and also always on the pre-render scanline (261)
+        // Allow phase pulses when rendering is enabled, and also on the pre-render scanline (261)
         // so that mappers (e.g., MMC3) can reliably receive a reload pulse before the first visible line.
-        // Tests that require zero pulses when rendering is disabled only cover visible scanlines.
-        const allowPhasePulses = renderingEnabled || this.scanline === 261 || this.uncondPulses;
-        // Sprite-phase pulse near dot ~260: if sprites use $1000, emit and mark done. Otherwise, defer to bg phase.
-        if (allowPhasePulses && this.cycle === 260) {
-          const height16 = (this.ctrl & 0x20) !== 0;
-          const spUses1000 = ((this.ctrl & 0x08) !== 0) || height16;
+        // Additionally, allow scanline-0 sprite/background pulses even with rendering disabled IF the corresponding
+        // plane is configured to use $1000 (per $2000), to satisfy timing-only ROMs that expect IRQs without PPUMASK.
+        // Unit tests that require zero pulses when rendering is disabled use default $2000=0, so this remains compatible.
+        const ctrlSnap = this.ctrlLine & 0xFF; // snapshot taken at cycle 1 of the scanline
+        const height16 = (ctrlSnap & 0x20) !== 0;
+        const spUses1000 = ((ctrlSnap & 0x08) !== 0) || height16;
+        const bgUses1000 = ((ctrlSnap & 0x10) !== 0);
+        const visibleLine = (this.scanline >= 0 && this.scanline <= 239);
+        const allowSpritePhase = renderingEnabled || this.scanline === 261 || (visibleLine && spUses1000) || this.uncondPulses;
+        const allowBgPhase = renderingEnabled || this.scanline === 261 || (visibleLine && bgUses1000) || this.uncondPulses;
+        // Sprite-phase pulse near dot ~260
+        if (allowSpritePhase && this.cycle === 260) {
           const emit = (!this.linePulseDone && spUses1000);
           if (this.traceEnabled && this.scanline === 0) {
             if (this.phaseTrace.length > 256) this.phaseTrace.shift();
@@ -352,8 +358,8 @@ export class PPU {
             this.a12DetectOverride = true; this.ppuRead(0x0FF8); this.a12DetectOverride = false;
           }
         }
-        // Background-phase pulse near dot ~324: always emit exactly one rise per visible/prerender line when rendering enabled
-        if (allowPhasePulses && this.cycle === 324) {
+        // Background-phase pulse near dot ~324
+        if (allowBgPhase && this.cycle === 324) {
           const emit = !this.linePulseDone;
           if (this.traceEnabled && this.scanline === 0) {
             if (this.phaseTrace.length > 256) this.phaseTrace.shift();

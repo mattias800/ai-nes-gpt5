@@ -30,9 +30,9 @@ export class NESSystem {
     if (mapper.setMirrorCallback) mapper.setMirrorCallback((mode: any) => this.ppu.setMirroring(mode));
     if (mapper.setTimeProvider) mapper.setTimeProvider(() => ({ frame: this.ppu.frame, scanline: this.ppu.scanline, cycle: this.ppu.cycle }));
     if (mapper.setCtrlProvider) mapper.setCtrlProvider(() => {
-      // Provide a live 'effective' ctrl reflecting current $2000/$2001 at the instant of IRQ clocking.
-      // This improves classification for tests that toggle $2000 mid-line.
-      const ctrl = (this.ppu.ctrl & 0xFF);
+      // Provide an 'effective' ctrl from the start-of-line snapshot (ctrlLine), which matches
+      // our phase pulse selection and produces stable classification for s0 timing tests.
+      const ctrl = ((this.ppu as any).getCtrlLine ? (this.ppu as any).getCtrlLine() : this.ppu.ctrl) & 0xFF;
       const mask = this.ppu.mask & 0xFF;
       const spUses1000 = (ctrl & 0x08) !== 0;
       const bgUses1000 = (ctrl & 0x10) !== 0;

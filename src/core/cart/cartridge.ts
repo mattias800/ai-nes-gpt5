@@ -45,7 +45,7 @@ export class Cartridge {
         };
         let useMMC6 = false;
         // MMC3 per-submapper options (extensible)
-        let mmc3Opts: { assertOnRel0?: boolean, prgRamSize?: number, prgNvramSize?: number, chrRamSize?: number } = { assertOnRel0: true };
+        let mmc3Opts: { assertOnRel0?: boolean, prgRamSize?: number, prgNvramSize?: number, chrRamSize?: number } = { assertOnRel0: false };
         if (nes2 && typeof sub === 'number') {
           const ent = MMC3_SUBMAPPER_TABLE[sub] || {};
           useMMC6 = !!ent.useMMC6;

@@ -168,6 +168,13 @@ export class MMC3 implements Mapper {
     const t = this.timeProvider ? this.timeProvider() : null;
     const onPreRender = !!(t && t.scanline === 261);
 
+    // Ignore pre-render A12 edges entirely for counter state (but still record trace),
+    // to ensure the first visible scanline's sprite/bg phases start from the intended counter value.
+    if (onPreRender) {
+      this.addTrace({ type: 'A12', ctr: this.irqCounter, en: this.irqEnabled });
+      return;
+    }
+
     let op: 'rel0'|'rel'|'dec'|'pre' = 'dec';
     const hadReloadReq = this.reloadPending === true;
 

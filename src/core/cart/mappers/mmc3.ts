@@ -168,9 +168,15 @@ export class MMC3 implements Mapper {
     const t = this.timeProvider ? this.timeProvider() : null;
     const onPreRender = !!(t && t.scanline === 261);
 
-    // Ignore pre-render A12 edges entirely for counter state (but still record trace),
-    // to ensure the first visible scanline's sprite/bg phases start from the intended counter value.
+    // Handle pre-render A12 edges by allowing reload of the counter, but never decrement or assert IRQ.
+    // This ensures the first visible scanline can immediately begin decrementing from the programmed latch value.
     if (onPreRender) {
+      if (this.reloadPending) {
+        this.irqCounter = this.irqLatch & 0xFF;
+        this.reloadPending = false;
+      } else if (this.irqCounter === 0) {
+        this.irqCounter = this.irqLatch & 0xFF;
+      }
       this.addTrace({ type: 'A12', ctr: this.irqCounter, en: this.irqEnabled });
       return;
     }
@@ -184,20 +190,30 @@ export class MMC3 implements Mapper {
     const isS0 = !!(t && t.scanline === 0);
     const cyc = t ? (t.cycle | 0) : -1;
     const spritePhase = (cyc >= 256 && cyc <= 266);
-    let spUses1000 = false;
-    if (this.ctrlProvider) { try { const ctrl = this.ctrlProvider() & 0xFF; spUses1000 = ((ctrl & 0x08) !== 0) || ((ctrl & 0x20) !== 0); } catch {} }
+    const bgPhase = (cyc >= 320 && cyc <= 330);
+    let spUses1000 = false, bgUses1000 = false;
+    if (this.ctrlProvider) {
+      try {
+        const ctrl = this.ctrlProvider() & 0xFF;
+        spUses1000 = ((ctrl & 0x08) !== 0) || ((ctrl & 0x20) !== 0);
+        bgUses1000 = ((ctrl & 0x10) !== 0);
+      } catch {}
+    }
 
     if (this.reloadPending) {
       // Special-case: at s0 sprite-phase with sprites@$1000 and a valid running counter, prefer decrement
       if (isS0 && spritePhase && spUses1000 && this.irqCounter > 0) {
         this.irqCounter = (this.irqCounter - 1) & 0xFF;
         op = 'dec';
+        this.reloadPending = false; // consume the pending reload; bg-phase will then take a normal path
       } else {
         this.irqCounter = this.irqLatch & 0xFF;
         this.reloadPending = false;
         op = (this.irqCounter === 0) ? 'rel0' : 'rel';
       }
     } else if (this.irqCounter === 0) {
+      // If we are at s0 sprite-phase and sprites@$1000, avoid immediate reload so bg-phase can see a dec->0 earlier?
+      // No, canonical behavior reloads when counter==0; keep it, but s0 sprite-phase prefers dec path above.
       this.irqCounter = this.irqLatch & 0xFF;
       op = (this.irqCounter === 0) ? 'rel0' : 'rel';
     } else {

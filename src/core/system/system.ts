@@ -30,16 +30,14 @@ export class NESSystem {
     if (mapper.setMirrorCallback) mapper.setMirrorCallback((mode: any) => this.ppu.setMirroring(mode));
     if (mapper.setTimeProvider) mapper.setTimeProvider(() => ({ frame: this.ppu.frame, scanline: this.ppu.scanline, cycle: this.ppu.cycle }));
     if (mapper.setCtrlProvider) mapper.setCtrlProvider(() => {
-      // Provide an 'effective' ctrl from the start-of-line snapshot (ctrlLine), which matches
-      // our phase pulse selection and produces stable classification for s0 timing tests.
-      const ctrl = ((this.ppu as any).getCtrlLine ? (this.ppu as any).getCtrlLine() : this.ppu.ctrl) & 0xFF;
+      // Provide a live 'effective' ctrl reflecting current $2000/$2001 at the instant of IRQ clocking.
+      const ctrl = (this.ppu.ctrl & 0xFF);
       const mask = this.ppu.mask & 0xFF;
       const spUses1000 = (ctrl & 0x08) !== 0;
       const bgUses1000 = (ctrl & 0x10) !== 0;
       const spOn = (mask & 0x10) !== 0;
       const bgOn = (mask & 0x08) !== 0;
       let eff = ctrl & 0x18;
-      // If neither plane is configured for $1000 but BG-only is enabled, treat as BG@$1000 for classification purposes
       if (!bgUses1000 && !spUses1000) {
         if (bgOn && !spOn) eff |= 0x10;
       }

@@ -336,11 +336,11 @@ export class PPU {
         // Additionally, allow scanline-0 sprite/background pulses even with rendering disabled IF the corresponding
         // plane is configured to use $1000 (per $2000), to satisfy timing-only ROMs that expect IRQs without PPUMASK.
         // Unit tests that require zero pulses when rendering is disabled use default $2000=0, so this remains compatible.
-        // Use live $2000 for plane selection at phase time, to honor mid-line toggles used by timing ROMs.
-        const ctrlLive = this.ctrl & 0xFF;
-        const height16 = (ctrlLive & 0x20) !== 0;
-        const spUses1000 = ((ctrlLive & 0x08) !== 0) || height16;
-        const bgUses1000 = ((ctrlLive & 0x10) !== 0);
+        // Use start-of-line $2000 snapshot for phase selection; timing ROMs set $2000 before s0.
+        const ctrlSnap = this.ctrlLine & 0xFF;
+        const height16 = (ctrlSnap & 0x20) !== 0;
+        const spUses1000 = ((ctrlSnap & 0x08) !== 0) || height16;
+        const bgUses1000 = ((ctrlSnap & 0x10) !== 0);
         const visibleLine = (this.scanline >= 0 && this.scanline <= 239);
         const allowSpritePhase = renderingEnabled || this.scanline === 261 || (visibleLine && spUses1000) || this.uncondPulses;
         const allowBgPhase = renderingEnabled || this.scanline === 261 || (visibleLine && bgUses1000) || this.uncondPulses;

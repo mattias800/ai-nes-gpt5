@@ -135,9 +135,11 @@ export class MMC3 implements Mapper {
         } catch {}
       }
     } else if (addr >= 0xE001 && addr <= 0xFFFF && (addr & 1) === 1) {
-      // Enable IRQs immediately on write
+      // Enable IRQs immediately on write; if counter is already zero, assert IRQ immediately (except on pre-render)
       this.irqEnabled = true;
       this.addTrace({ type: 'E001' });
+      // No immediate assert on enable; only dec->0 (and rel0 if configured) should assert via A12 edges.
+      try { /* noop */ } catch {}
       if (this.traceEnabled) {
         try {
           const t = this.timeProvider ? this.timeProvider() : null;

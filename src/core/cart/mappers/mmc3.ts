@@ -135,11 +135,9 @@ export class MMC3 implements Mapper {
         } catch {}
       }
     } else if (addr >= 0xE001 && addr <= 0xFFFF && (addr & 1) === 1) {
-      // Enable IRQs immediately on write; if counter is already zero, assert IRQ immediately (except on pre-render)
+      // Enable IRQs immediately on write
       this.irqEnabled = true;
       this.addTrace({ type: 'E001' });
-      // No immediate assert on enable; only dec->0 (and rel0 if configured) should assert via A12 edges.
-      try { /* noop */ } catch {}
       if (this.traceEnabled) {
         try {
           const t = this.timeProvider ? this.timeProvider() : null;
@@ -240,12 +238,15 @@ export class MMC3 implements Mapper {
     // - Assert on decrement-to-zero (classic)
     // - Optionally, also assert on reload-to-zero (latch==0 or reload while counter==0 producing 0), enabling "1-clocking" behavior
     // - Never assert on pre-render scanline
-    if (!onPreRender && this.irqEnabled && ((op === 'dec' && this.irqCounter === 0) || (this.assertOnRel0 && op === 'rel0'))) {
-      this.irq = true;
-      this.addTrace({ type: 'IRQ' });
-      if (this.traceEnabled) {
-        try { /* eslint-disable no-console */ console.log(`[mmc3] IRQ assert${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`); /* eslint-enable no-console */ } catch {}
-      }
+    if (!onPreRender) {
+      const decToZero = (op === 'dec' && this.irqCounter === 0);
+      const relToZero = (op === 'rel0');
+      if (this.irqEnabled && (decToZero || (this.assertOnRel0 && relToZero))) {
+        this.irq = true;
+        this.addTrace({ type: 'IRQ' });
+        if (this.traceEnabled) {
+          try { /* eslint-disable no-console */ console.log(`[mmc3] IRQ assert${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`); /* eslint-enable no-console */ } catch {}
+        }
     }
 
 

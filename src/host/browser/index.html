@@ -1,39 +1,102 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ai-nes-gpt5 — Browser Host</title>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; background: #1e1e1e; color: #ddd; }
-      .row { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
-      #screen { image-rendering: pixelated; background: #000; width: 512px; height: 480px; border: 1px solid #444; }
-      button, input[type=file] { font: inherit; }
-      .small { font-size: 12px; color: #aaa; }
-    </style>
+    <link rel="stylesheet" href="/styles/ui.css" />
   </head>
   <body>
-    <h1>ai-nes-gpt5 — Browser Host</h1>
-    <div class="row">
-      <input id="rom" type="file" accept=".nes" />
-      <button id="start" disabled>Start</button>
-      <button id="pause" disabled>Pause</button>
-      <span id="status" class="small">Load a .nes file</span>
-    </div>
-    <div class="row">
-      <label for="volume">Volume</label>
-      <input id="volume" type="range" min="0" max="100" value="25" />
-      <span id="volumeLabel" class="small">25%</span>
-    </div>
-    <div class="row">
-      <label><input id="opt-stats" type="checkbox" /> Stats overlay</label>
-      <label><input id="opt-fastdraw" type="checkbox" /> Fast draw</label>
-      <label><input id="opt-lowlat" type="checkbox" /> Low-latency audio</label>
-      <label><input id="opt-noaudio" type="checkbox" /> No audio</label>
-    </div>
-    <div class="row small">Note: Low-latency and No audio apply on next Start.</div>
-    <canvas id="screen" width="256" height="240"></canvas>
+    <div class="app">
+      <header class="toolbar">
+        <div class="brand">
+          <div class="logo" aria-hidden="true">▲</div>
+          <h1 class="title">ai-nes-gpt5</h1>
+          <div class="subtitle">Browser Host</div>
+        </div>
+        <div class="actions">
+          <!-- Keep the original input; style and trigger via label -->
+          <input id="rom" type="file" accept=".nes" class="visually-hidden" />
+          <label for="rom" class="btn primary" title="Open a .nes file">Open ROM</label>
 
+          <button id="start" class="btn" disabled>Start</button>
+          <button id="pause" class="btn" disabled>Pause</button>
+          <button id="help-btn" class="btn ghost" title="Keyboard help" aria-controls="help-modal" aria-expanded="false">Help</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="panel screen-panel" aria-label="Display">
+          <div class="screen-wrap">
+            <canvas id="screen" width="256" height="240"></canvas>
+          </div>
+        </section>
+
+        <aside class="panel controls" aria-label="Controls">
+          <div class="control-row">
+            <label class="control-label" for="volume">Volume</label>
+            <input id="volume" type="range" min="0" max="100" value="25" />
+            <span id="volumeLabel" class="muted">25%</span>
+          </div>
+          <div class="control-row">
+            <label class="control-label" for="scale-control">Scale</label>
+            <select id="scale-control">
+              <option value="1">1x</option>
+              <option value="2" selected>2x</option>
+              <option value="3">3x</option>
+              <option value="4">4x</option>
+              <option value="5">5x</option>
+              <option value="6">6x</option>
+            </select>
+            <label class="fit-toggle"><input id="scale-fit" type="checkbox" /> <span>Fit</span></label>
+          </div>
+
+          <div class="control-row toggles">
+            <label><input id="opt-stats" type="checkbox" /> <span>Stats overlay</span></label>
+            <label><input id="opt-fastdraw" type="checkbox" /> <span>Fast draw</span></label>
+            <label><input id="opt-lowlat" type="checkbox" /> <span>Low-latency audio</span></label>
+            <label><input id="opt-noaudio" type="checkbox" /> <span>No audio</span></label>
+          </div>
+          <p class="note">Note: Low-latency and No audio apply on next Start.</p>
+        </aside>
+      </main>
+
+      <footer class="status-bar" aria-live="polite" aria-atomic="true">
+        <span class="status-label">Status</span>
+        <span id="status" class="status-text">Load a .nes file</span>
+      </footer>
+
+      <!-- Keyboard help modal (UI-only) -->
+      <div id="help-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="help-title">
+        <div class="modal-card">
+          <div class="modal-header">
+            <h2 id="help-title">Keyboard</h2>
+            <button class="btn icon" id="help-close" aria-label="Close help">✕</button>
+          </div>
+          <div class="modal-body">
+            <ul class="kbd-list">
+              <li><span class="kbd">Z</span> = A</li>
+              <li><span class="kbd">X</span> = B</li>
+              <li><span class="kbd">Enter</span> = Start</li>
+              <li><span class="kbd">Shift</span> = Select</li>
+              <li><span class="kbd">↑ ↓ ← →</span> = D‑Pad</li>
+            </ul>
+            <p class="muted">Tip: Enable the <strong>Stats overlay</strong> to view audio/video diagnostics.</p>
+          </div>
+        </div>
+      </div>
+      <div id="dropzone" class="dropzone hidden" aria-hidden="true">
+        <div class="drop-card">
+          <div class="drop-icon">⬇</div>
+          <div class="drop-text">Drop ROM to load</div>
+          <div class="drop-hint">or click <strong>Open ROM</strong> above</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- UI-only script (does not touch emulator harness) -->
+    <script type="module" src="/ui.ts"></script>
+    <!-- Emulator harness (unchanged) -->
     <script type="module" src="/main.ts"></script>
   </body>
 </html>

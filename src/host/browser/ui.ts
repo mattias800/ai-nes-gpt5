@@ -70,6 +70,35 @@ applyScale()
 const dropzone = $('#dropzone') as HTMLElement | null
 const romInput = $('#rom') as HTMLInputElement | null
 
+// Fullscreen toggle (UI-only)
+const fsBtn = $('#fs-btn') as HTMLButtonElement | null
+const fsTarget = document.querySelector('.screen-panel') as HTMLElement | null
+
+const fsUpdate = (): void => {
+  const active = !!document.fullscreenElement
+  if (fsBtn) {
+    fsBtn.textContent = active ? 'Exit Fullscreen' : 'Fullscreen'
+    fsBtn.setAttribute('aria-pressed', active ? 'true' : 'false')
+  }
+}
+
+fsBtn?.addEventListener('click', async (): Promise<void> => {
+  try {
+    if (!document.fullscreenElement) {
+      await (fsTarget ?? document.documentElement).requestFullscreen()
+    } else {
+      await document.exitFullscreen()
+    }
+  } catch (e) {
+    // ignore
+  } finally {
+    fsUpdate()
+  }
+})
+
+document.addEventListener('fullscreenchange', fsUpdate)
+fsUpdate()
+
 // Game info parsing (UI-only, reads iNES/NES 2.0 header)
 interface GameInfo { title: string; prgRomBytes: number; chrRomBytes: number; mapper: number; mapperName: string; hasBattery: boolean; mirroring: 'Horizontal'|'Vertical'|'Four-screen'; isNES2: boolean; submapper?: number }
 
@@ -165,6 +194,97 @@ const loadGameInfoFromFile = async (file: File): Promise<void> => {
 romInput?.addEventListener('change', () => {
   const f = romInput.files?.[0]
   if (f) void loadGameInfoFromFile(f)
+})
+
+// Gamepad -> synthetic Keyboard events (UI-only controller support)
+const padInd = $('#pad-ind') as HTMLElement | null
+let trackedPad: number | null = null
+let held: Record<string, boolean> = {}
+
+const dispatchKey = (code: string, down: boolean): void => {
+  const type = down ? 'keydown' : 'keyup'
+  const ev = new KeyboardEvent(type, { code, bubbles: true, cancelable: true })
+  window.dispatchEvent(ev)
+}
+
+const updateIndicator = (connected: boolean, id?: string): void => {
+  if (!padInd) return
+  padInd.textContent = connected ? `🎮 ${id || 'Controller'}` : '🎮 Not connected'
+}
+
+window.addEventListener('gamepadconnected', (e: GamepadEvent) => {
+  if (trackedPad == null) trackedPad = e.gamepad.index
+  updateIndicator(true, e.gamepad.id)
+})
+window.addEventListener('gamepaddisconnected', (e: GamepadEvent) => {
+  if (trackedPad === e.gamepad.index) {
+    // release any held keys
+    for (const code of Object.keys(held)) { if (held[code]) { dispatchKey(code, false); held[code] = false } }
+    trackedPad = null
+    updateIndicator(false)
+  }
+})
+
+const mapPadState = (gp: Gamepad): Record<string, boolean> => {
+  const pressed = (i: number): boolean => {
+    const b = gp.buttons[i]; return !!b && (typeof b === 'object' ? b.pressed : (b as unknown as number) > 0.5)
+  }
+  const axes = gp.axes || []
+  const thresh = 0.5
+  const left = axes[0] ?? 0
+  const up = axes[1] ?? 0
+  const m: Record<string, boolean> = {}
+  // Face buttons
+  if (pressed(0)) m['KeyZ'] = true // A
+  if (pressed(1)) m['KeyX'] = true // B
+  // Start/Select
+  if (pressed(9)) m['Enter'] = true // Start
+  if (pressed(8)) m['ShiftLeft'] = true // Select
+  // D-Pad
+  if (pressed(12) || up < -thresh) m['ArrowUp'] = true
+  if (pressed(13) || up > thresh) m['ArrowDown'] = true
+  if (pressed(14) || left < -thresh) m['ArrowLeft'] = true
+  if (pressed(15) || left > thresh) m['ArrowRight'] = true
+  return m
+}
+
+const pollPad = (): void => {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : ([] as unknown as Gamepad[])
+  let gp: Gamepad | null = null
+  if (trackedPad != null) gp = pads[trackedPad] || null
+  if (!gp) {
+    // find first connected
+    for (const p of pads) { if (p && p.connected) { gp = p; trackedPad = p.index; break } }
+  }
+  if (gp && gp.connected) {
+    const next = mapPadState(gp)
+    // diff against held
+    const allCodes = new Set([...Object.keys(held), ...Object.keys(next)])
+    for (const code of allCodes) {
+      const was = !!held[code]
+      const now = !!next[code]
+      if (now && !was) { dispatchKey(code, true) }
+      if (!now && was) { dispatchKey(code, false) }
+    }
+    held = next
+    updateIndicator(true, gp.id)
+  } else {
+    // if lost, release keys
+    if (Object.keys(held).some(k => held[k])) {
+      for (const code of Object.keys(held)) { if (held[code]) { dispatchKey(code, false) } }
+      held = {}
+    }
+    updateIndicator(false)
+  }
+  requestAnimationFrame(pollPad)
+}
+
+requestAnimationFrame(pollPad)
+
+// Release held keys on blur
+window.addEventListener('blur', () => {
+  for (const code of Object.keys(held)) { if (held[code]) { dispatchKey(code, false) } }
+  held = {}
 })
 
 const showDrop = (): void => { dropzone?.classList.remove('hidden') }

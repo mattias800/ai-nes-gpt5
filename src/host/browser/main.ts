@@ -15,8 +15,8 @@ if (!sabAvailable) {
   const div = document.createElement('div')
   div.style.cssText = 'position:fixed;left:8px;bottom:8px;background:rgba(0,0,0,0.75);color:#fff;padding:10px 12px;border-radius:6px;max-width:520px;font:13px/1.4 system-ui;z-index:9999;'
   div.innerHTML = `
-    <div style="margin-bottom:6px;font-weight:600">Audio disabled (SharedArrayBuffer unavailable)</div>
-    <div>This host will run in video-only fallback. For audio, start via the dev server or host with headers:<br/>
+    <div style="margin-bottom:6px;font-weight:600">SharedArrayBuffer unavailable</div>
+    <div>This environment lacks COOP/COEP. Using legacy audio fallback (slightly higher latency). For optimal audio, start via the dev server or host with headers:<br/>
       <code style="display:inline-block;margin-top:4px">Cross-Origin-Opener-Policy: same-origin</code><br/>
       <code style="display:inline-block">Cross-Origin-Embedder-Policy: require-corp</code>
     </div>`
@@ -365,6 +365,7 @@ startBtn.addEventListener('click', async (): Promise<void> => {
   let sampleRate = 48000
   const channels = 2
   const wantAudio = sabAvailable && !options.forceNoAudio
+  let usingLegacy = false
   if (wantAudio) {
     try {
       // Explicitly match device sampleRate to avoid resample mismatch; load worklet before creating node
@@ -376,6 +377,16 @@ startBtn.addEventListener('click', async (): Promise<void> => {
     } catch (e) {
       console.warn('Audio setup failed, falling back to no-audio mode:', e)
       sab = null
+    }
+  } else if (!options.forceNoAudio && !sabAvailable) {
+    // SAB unavailable (e.g., GitHub Pages). Use legacy audio path instead of video-only.
+    try {
+      await startLegacyAudioGraph()
+      sampleRate = audioCtx?.sampleRate || 48000
+      usingLegacy = true
+    } catch (e) {
+      console.warn('Legacy audio setup failed, continuing without audio:', e)
+      usingLegacy = false
     }
   }
   // Spawn worker and init
@@ -398,7 +409,7 @@ startBtn.addEventListener('click', async (): Promise<void> => {
     }
   }
   const targetFillFrames = fillParam > 0 ? fillParam : (options.lowLat ? 768 : 1024)
-  worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 } : null, sampleRate, channels: 1, targetFillFrames, noAudio: !sab })
+  worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 } : null, sampleRate, channels: 1, targetFillFrames, noAudio: (!sab && !usingLegacy), useLegacy: usingLegacy })
   worker.onerror = (ev: ErrorEvent): void => { console.error('[worker] error', ev.message, ev.error) }
   worker.onmessageerror = (ev: MessageEvent): void => { console.error('[worker] messageerror', ev.data) }
   // Load ROM and start (send a copy so we retain our local ROM for possible fallback)
@@ -411,7 +422,7 @@ startBtn.addEventListener('click', async (): Promise<void> => {
   startBtn.disabled = true
   pauseBtn.disabled = false
   pauseBtn.textContent = 'Pause'
-  statusEl.textContent = sab ? 'Running' : 'Running (no audio)'
+  statusEl.textContent = sab ? 'Running' : (usingLegacy ? 'Running (legacy audio)' : 'Running (no audio)')
     // If no frames arrive shortly after start, surface a helpful status to aid debugging.
     const startCheckTs = performance.now()
     setTimeout((): void => {

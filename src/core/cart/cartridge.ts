@@ -67,6 +67,12 @@ export class Cartridge {
       case 66: this.mapper = new GNROM(rom.prg, rom.chr, chrRamSize, prgRamSize ?? 0x2000, prgNvramSize ?? 0); break;
       case 69: this.mapper = new FME7(rom.prg, rom.chr, chrRamSize, prgRamSize ?? 0x2000, prgNvramSize ?? 0); break;
       case 71: this.mapper = new Camerica(rom.prg, rom.chr, chrRamSize, prgRamSize ?? 0x2000, prgNvramSize ?? 0); break;
+      case 64: {
+        // Tengen RAMBO-1 (64) can be approximated by an MMC3-compatible core for many games.
+        // We map it to MMC3 as a pragmatic default so titles can boot; refine later if needed.
+        this.mapper = new MMC3(rom.prg, rom.chr, { chrRamSize, prgRamSize: prgRamSize ?? 0x2000, prgNvramSize: prgNvramSize ?? 0 });
+        break;
+      }
       case 21: this.mapper = new VRC2_4(rom.prg, rom.chr, 21, chrRamSize, prgRamSize ?? 0x2000, prgNvramSize ?? 0); break;
       case 22: this.mapper = new VRC2_4(rom.prg, rom.chr, 22, chrRamSize, prgRamSize ?? 0x2000, prgNvramSize ?? 0); break;
       case 23: this.mapper = new VRC2_4(rom.prg, rom.chr, 23, chrRamSize, prgRamSize ?? 0x2000, prgNvramSize ?? 0); break;

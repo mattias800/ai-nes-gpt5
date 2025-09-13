@@ -21,6 +21,7 @@ let sys: NESSystem | null = null
 let writer = null as ReturnType<typeof getWriter> | null
 let legacyChunk: Float32Array | null = null
 let sampleRate = 48000
+let lastLegacyPumpTs = (typeof performance !== 'undefined') ? performance.now() : 0
 let channels = 2
 let run = false
 let useBlep = false
@@ -30,9 +31,6 @@ let lastPpuFrameSent = -1
 let targetFillFrames = 4096
 let noAudio = false
 let useLegacy = false
-// Legacy path cadence (adjusted on init based on sampleRate)
-let legacyChunkFrames = 1024
-let legacyPumpMs = 23
 // Debug logging gate (off by default)
 let debugAudio = false
 
@@ -184,12 +182,28 @@ let lastPumpTs = (typeof performance !== 'undefined') ? performance.now() : 0
 const pumpAudio = (): void => {
   if (!run || !sys) return
   if (useLegacy) {
-    // Generate one chunk per pump and send to main; allocate a fresh buffer and transfer it
-    const frames = legacyChunkFrames | 0
+    // Micro-bursty legacy generation: produce only what elapsed walltime demands, in small chunks
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0
+    const dt = Math.max(0, now - lastLegacyPumpTs)
+    lastLegacyPumpTs = now
+    const sr = (sampleRate && isFinite(sampleRate) && sampleRate > 0) ? sampleRate : 44100
+    let must = Math.ceil((sr * dt) / 1000)
+    // Add a small headroom to avoid underruns when timers jitter
+    must = Math.min(2048, must + 128)
+
+    let produced = 0
     const ch = Math.max(1, channels|0)
-    const out = new Float32Array(frames * ch)
-    generateInto(frames, out)
-    ;(postMessage as (m: unknown, t?: Transferable[]) => void)({ type: 'audio-chunk', samples: out }, [out.buffer])
+    const t0 = now
+    const perChunk = 256
+    while (produced < must) {
+      const toProduce = Math.min(perChunk, must - produced)
+      const out = new Float32Array(toProduce * ch)
+      generateInto(toProduce, out)
+      ;(postMessage as (m: unknown, t?: Transferable[]) => void)({ type: 'audio-chunk', samples: out }, [out.buffer])
+      produced += toProduce
+      const t1 = (typeof performance !== 'undefined') ? performance.now() : 0
+      if ((t1 - t0) > 3.0) break
+    }
     return
   }
   if (!writer) return
@@ -305,8 +319,8 @@ const sendVideoFrame = (): void => {
 }
 
 const startLoops = (): void => {
-  // SAB path: very frequent, short pumps; legacy: pump at chunk cadence to reduce overhead
-  const audioInterval = useLegacy ? Math.max(10, legacyPumpMs | 0) : 2
+  // SAB path: very frequent short pumps; legacy: modest interval to keep UI responsive
+  const audioInterval = useLegacy ? 4 : 2
   if (audioTimer == null) audioTimer = (setInterval(pumpAudio, audioInterval) as unknown as number)
   if (videoTimer == null) videoTimer = (setInterval(sendVideoFrame, 1000 / 60) as unknown as number)
 }
@@ -330,8 +344,6 @@ const handleMessage = (e: MessageEvent<Msg>): void => {
       sampleRate = msg.sampleRate|0
       channels = msg.channels|0
       targetFillFrames = msg.targetFillFrames|0
-      // Derive legacy cadence from sample rate
-      legacyPumpMs = Math.max(10, Math.floor((legacyChunkFrames * 1000) / Math.max(1, sampleRate)))
       // Allocate scratch based on channels
       scratch = new Float32Array(maxChunkFrames * channels)
       

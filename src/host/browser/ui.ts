@@ -70,6 +70,103 @@ applyScale()
 const dropzone = $('#dropzone') as HTMLElement | null
 const romInput = $('#rom') as HTMLInputElement | null
 
+// Game info parsing (UI-only, reads iNES/NES 2.0 header)
+interface GameInfo { title: string; prgRomBytes: number; chrRomBytes: number; mapper: number; mapperName: string; hasBattery: boolean; mirroring: 'Horizontal'|'Vertical'|'Four-screen'; isNES2: boolean; submapper?: number }
+
+const mapperName = (id: number): string => {
+  const m: Record<number, string> = {
+    0: 'NROM',
+    1: 'MMC1',
+    2: 'UxROM (UNROM/UN1ROM)',
+    3: 'CNROM',
+    4: 'MMC3 (TxROM)',
+    5: 'MMC5',
+    7: 'AxROM',
+    9: 'MMC2',
+    10: 'MMC4',
+    11: 'Color Dreams',
+    13: 'CPROM',
+    15: '100-in-1',
+    19: 'Namco 163/175/340',
+    21: 'Konami VRC4a/VRC4c',
+    22: 'Konami VRC2a',
+    23: 'Konami VRC2b/VRC4e',
+    24: 'Konami VRC6a',
+    25: 'Konami VRC4b/VRC4d',
+    26: 'Konami VRC6b',
+    66: 'GxROM / GNROM',
+    69: 'Sunsoft FME-7',
+    70: 'Bandai 74HC161/32',
+    71: 'Camerica',
+    79: 'NINA-003/006',
+    85: 'Konami VRC7',
+    94: 'MMC3 variant (TxSROM)',
+  }
+  return m[id] ?? `Mapper ${id}`
+}
+
+const parseHeader = (bytes: Uint8Array, fileName: string): GameInfo | null => {
+  if (bytes.length < 16) return null
+  if (!(bytes[0] === 0x4E && bytes[1] === 0x45 && bytes[2] === 0x53 && bytes[3] === 0x1A)) return null
+  const hdr = bytes
+  const flags6 = hdr[6] | 0
+  const flags7 = hdr[7] | 0
+  const isNES2 = ((flags7 & 0x0C) === 0x08)
+  let mapper = ((flags7 & 0xF0) | (flags6 >> 4)) | 0
+  let submapper: number | undefined
+  if (isNES2) {
+    mapper |= (hdr[8] & 0x0F) << 8
+    submapper = (hdr[8] >> 4) & 0x0F
+  }
+  // Sizes (basic iNES; NES 2.0 extended sizes not handled for extremely large ROMs)
+  const prgRomBytes = (hdr[4] | 0) * 16 * 1024
+  const chrRomBytes = (hdr[5] | 0) * 8 * 1024
+  const hasBattery = !!(flags6 & 0x02)
+  const mirroring: GameInfo['mirroring'] = (flags6 & 0x08) ? 'Four-screen' : ((flags6 & 0x01) ? 'Vertical' : 'Horizontal')
+  const title = fileName.replace(/\.[^.]+$/i, '')
+  return { title, prgRomBytes, chrRomBytes, mapper, mapperName: mapperName(mapper), hasBattery, mirroring, isNES2, submapper }
+}
+
+const fmtBytes = (n: number): string => {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2).replace(/\.00$/, '')} MB`
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`
+  return `${n} B`
+}
+
+const gameInfoEl = $('#game-info') as HTMLElement | null
+const renderGameInfo = (gi: GameInfo | null): void => {
+  if (!gameInfoEl) return
+  if (!gi) { gameInfoEl.innerHTML = '<div class="info-header">Game Info</div><div class="info-body muted">Invalid or unsupported ROM.</div>'; return }
+  const sub = gi.submapper != null ? ` (submapper ${gi.submapper})` : ''
+  gameInfoEl.innerHTML = `
+    <div class="info-header">Game Info</div>
+    <div class="info-grid">
+      <div class="k">Title</div><div class="v">${gi.title}</div>
+      <div class="k">PRG ROM</div><div class="v">${fmtBytes(gi.prgRomBytes)}</div>
+      <div class="k">CHR ${gi.chrRomBytes ? 'ROM' : 'RAM'}</div><div class="v">${gi.chrRomBytes ? fmtBytes(gi.chrRomBytes) : 'Present'}</div>
+      <div class="k">Mapper</div><div class="v">${gi.mapperName} (#${gi.mapper})${sub}</div>
+      <div class="k">Mirroring</div><div class="v">${gi.mirroring}</div>
+      <div class="k">Battery</div><div class="v">${gi.hasBattery ? 'Yes' : 'No'}</div>
+      <div class="k">Header</div><div class="v">${gi.isNES2 ? 'NES 2.0' : 'iNES'}</div>
+    </div>
+  `
+}
+
+const loadGameInfoFromFile = async (file: File): Promise<void> => {
+  try {
+    const buf = new Uint8Array(await file.arrayBuffer())
+    const info = parseHeader(buf, file.name)
+    renderGameInfo(info)
+  } catch {
+    renderGameInfo(null)
+  }
+}
+
+romInput?.addEventListener('change', () => {
+  const f = romInput.files?.[0]
+  if (f) void loadGameInfoFromFile(f)
+})
+
 const showDrop = (): void => { dropzone?.classList.remove('hidden') }
 const hideDrop = (): void => { dropzone?.classList.add('hidden') }
 

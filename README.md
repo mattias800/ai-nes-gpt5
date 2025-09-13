@@ -1,11 +1,20 @@
 # ai-nes-gpt5 — NES emulator (TypeScript), accuracy-first, fully automated
 
+Authorship & purpose (AI-generated)
+- Purpose: this repository exists to test whether AI can autonomously create an accurate NES emulator and surrounding tooling. The goal was not for a human to handcraft an emulator, but to evaluate AI capabilities end‑to‑end.
+- Authors: gpt-5 (high reasoning), opus 4, Cursor Auto
+- Provenance: no human has written a line of code in this repository; all code, refactors, browser harness work, and test scaffolding were produced by AI tools. Changes land via machine‑generated diffs, and automated tests are the source of truth.
+
+![SMB3 Title Animation](screenshots/smb3_title_30fps_5s_2x.gif)
+
 ai-nes-gpt5 is a headless NES (RP2A03/RP2C02) emulator written in TypeScript with a strict, automated, test-first workflow. Local verification is the source of truth: correctness gates must pass before any manual trial is considered.
 
 Important: This project emphasizes automated verification and determinism. Remote CI has been intentionally removed; all verification is local.
 
 Contents
+- Authorship & purpose (AI-generated)
 - Overview
+- Browser host (Web)
 - Design goals
 - Quick start
 - Local verification and test buckets
@@ -14,14 +23,17 @@ Contents
 - Optional screenshots and artifacts
 - Instrumentation and diagnostics
 - Architecture layout
+- Known limitations
+- Authorship & provenance
 - Development workflow
 - Licensing and ROM policy
 - Acknowledgements
 
 Overview
-- Language/runtime: TypeScript, Node.js
+- Language/runtime: TypeScript, Node.js, browser-hosted Web platform
 - Scope: CPU (6502 without decimal), PPU (RP2C02), APU (frame counter, pulse/triangle/noise/DMC), mappers (NROM, UxROM, CNROM, MMC1, MMC3)
 - Headless by design: core is UI-agnostic; tests and harnesses drive video/audio deterministically
+- Browser host included: dedicated Worker runs the NES core; AudioWorklet + SharedArrayBuffer ring buffer feeds low-latency audio; main thread renders video to a 2D canvas with palette mapping
 - Development modality: AI-driven, automated file edits and scripted verification (local-only); changes land via reproducible diffs and tests.
 
 Design goals
@@ -33,9 +45,11 @@ Design goals
 Quick start
 - Node.js 18+ recommended
 - Install dependencies: `npm install`
+- Dev server (browser host with COOP/COEP headers for SAB): `npm run dev` then open http://localhost:5173/
+- Load your .nes file via the UI and click Start
 - Full local verification (fast + slow with VT timing): `npm run verify`
 - Run all tests with coverage: `npm test`
-- Build TypeScript: `npm run build`
+- Build TypeScript (for Node-only workflows or distribution): `npm run build`
 - Fetch public test ROMs (optional): `npm run fetch:roms` (configure or place files under ./roms)
 
 Local verification and test buckets
@@ -87,12 +101,31 @@ Instrumentation and diagnostics
 - Set `MMC3_TRACE=1` to record mapper register writes and A12-driven counter activity (trace growth is bounded to avoid perf issues).
 - Many ROM harnesses auto-dump helpful context on failure (CPU tail PCs/opcodes, framebuffer CRC, state sample CRC, A12/mapper trace heads).
 
+Browser host (Web)
+- Architecture
+  - Dedicated Worker runs the emulator core (CPU/PPU/APU/mappers)
+  - AudioWorklet consumes audio from a SharedArrayBuffer ring buffer (mono interleaved frames), duplicating to stereo at output
+  - Main thread paints a 256×240 indexed framebuffer to a 2D canvas using a NES palette
+- Requirements
+  - Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp (Vite dev/preview configured)
+- Diagnostics overlay: add `?stats=1` to the URL
+  - Shows worklet/worker occupancy, underruns, pump cadence, FPS, and draw cost
+- Runtime flags (URL query)
+  - `fastdraw=1` — Draw frames immediately on arrival (lowest display/input latency; may tear)
+  - `lowlat=1` — Lower default target audio buffer (768 frames) for reduced audio latency
+  - `fill=NNN` — Force target audio buffer frames (e.g., `fill=640`, `768`, `896`, `1024`)
+  - APU/PPU tuning: `timing=legacy`, `region=pal|ntsc`, `apu_timing=fractional|integer`, `apu_synth=blep|raw`
+- Notes
+  - SMB1 runs at 60 FPS with clean audio by default
+  - SMB3 is heavier (MMC3 IRQ activity). Use the flags above to tailor latency vs headroom per device/browser
+
 Architecture layout
 - src/core/cpu: 6502 core (no decimal), official + common unofficial opcodes, branch/page-cross timing, IRQ/NMI
 - src/core/ppu: RP2C02 features including VT sampling, odd-frame cycle skip, copyX/copyY windows, sprite evaluation, palette mirroring
 - src/core/apu: frame counter (4/5-step), envelopes, length/sweep, triangle/noise/DMC, simple mixer
 - src/core/cart: iNES loader, mappers (NROM, UxROM, CNROM, MMC1, MMC3)
 - src/core/system: glue tying CPU/PPU/APU/mapper and IO, cycle stepping, IRQ/NMI delivery
+- src/host/browser: Web harness (Dedicated Worker + AudioWorklet + SAB ring buffer), 2D canvas renderer, diagnostics overlay
 - tests/*: exhaustive CPU/APU/PPU/mappers unit tests and ROM-driven harnesses (SMB/SMB3)
 
 Development workflow
@@ -105,6 +138,16 @@ Development workflow
 Licensing and ROM policy
 - Do not commit commercial game ROMs. Use publicly redistributable test ROMs only, or point tests to local paths via environment variables.
 - The code in this repository is provided under an open-source license (see LICENSE if present). ROMs remain the property of their respective rights holders.
+
+Known limitations
+- MMC3: a few edge-case timing bugs remain (documented in tests); accuracy work is ongoing
+- Browser host: latency/tearing tradeoffs are configurable at runtime (see `fastdraw`, `fill`, `lowlat`) and may need per-device tuning
+- Audio: the harness prioritizes zero dropouts; for the lowest-possible latency, reduce `fill` and enable `fastdraw`, balancing against underrun risk
+
+Authorship & provenance
+- Authors: gpt-5 (high reasoning), opus 4, Cursor Auto
+- Provenance: no human has written a line of code in this repository; development, refactors, and harness tuning were performed autonomously by AI tools
+- Workflow: changes land via diffs with automated local verification; tests are the source of truth
 
 Acknowledgements
 - The NES community and docs (e.g., nesdev wiki) for public information on hardware behavior, timing, and mappers.

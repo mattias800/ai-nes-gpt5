@@ -99,7 +99,7 @@ const occupancy = (): number => {
   return writer.occupancy()
 }
 
-const audioQuantum = 32
+const audioQuantum = 128
 const maxChunkFrames = 1024
 
 const generateInto = (frames: number, buf: Float32Array): number => {
@@ -177,6 +177,7 @@ const postStatsIfDue = (toProduce: number, occNow: number, t0: number, t1: numbe
 }
 
 let pumpCount = 0
+let lastPumpTs = (typeof performance !== 'undefined') ? performance.now() : 0
 const pumpAudio = (): void => {
   if (!run || !sys) return
   if (useLegacy) {
@@ -227,19 +228,35 @@ const pumpAudio = (): void => {
   if (!scratch) scratch = new Float32Array(maxChunkFrames * channels)
   
   const t0 = (typeof performance !== 'undefined') ? performance.now() : 0
+  const dt = Math.max(0, t0 - lastPumpTs)
+  lastPumpTs = t0
+  
+  // Compute how many frames we must produce this pump based on elapsed real time
+  const mustProduce = Math.max(audioQuantum, Math.min(maxChunkFrames, Math.ceil((sampleRate | 0) * dt / 1000)))
+
   let bursts = 0
   let producedTotal = 0
   
-  // Aim to keep buffer around ~65% full to ensure steady CPU/PPU progression
-  const fillTarget = Math.max(audioQuantum, Math.floor(targetFillFrames * 0.65))
+  // Aim to keep buffer around ~55–60% for steady progression; keep each pump very short
+  const fillTarget = Math.max(audioQuantum, Math.floor(targetFillFrames * 0.55))
+  let maxPumpFramesPerCall = 512
+  let maxPumpMs = 2.5
+  
+  // If we are far behind or elapsed time was long, allow a slightly bigger pump budget (but keep it tight)
+  const deficit = Math.max(0, fillTarget - occNow)
+  const ratio = fillTarget > 0 ? (deficit / fillTarget) : 0
+  if (ratio > 0.5 || mustProduce > 512) { maxPumpMs = 4.0; maxPumpFramesPerCall = 768 }
 
-  // Produce audio in smaller, more frequent bursts for stability
-  while (occNow < fillTarget && freeNow >= audioQuantum && bursts < 3) {
-    const desired = Math.min(freeNow, Math.max(0, fillTarget - occNow))
-    const toProduce = Math.max(audioQuantum, Math.min(128, desired))
+  const targetThisPump = Math.min(maxPumpFramesPerCall, mustProduce + Math.min(deficit, 384))
+
+  // Produce audio in very small bursts; enforce time and frame budget per pump
+  while (occNow < fillTarget && freeNow >= audioQuantum && bursts < 6 && producedTotal < targetThisPump) {
+    const desired = Math.min(freeNow, Math.max(0, fillTarget - occNow), targetThisPump - producedTotal)
+    const perBurstCap = ratio > 0.5 ? 192 : 128
+    const toProduce = Math.max(audioQuantum, Math.min(perBurstCap, desired))
     const buf = scratch.subarray(0, toProduce * channels)
     generateInto(toProduce, buf)
-    
+
     const written = writer.write(buf)
     if (written === 0) {
       if (debugAudio) console.warn('[worker] failed to write audio data, freeSpace:', freeNow, 'toProduce:', toProduce)
@@ -249,6 +266,10 @@ const pumpAudio = (): void => {
     occNow = writer.occupancy()
     freeNow = writer.freeSpace()
     bursts++
+
+    // Time-budget guard
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0
+    if ((now - t0) > maxPumpMs) break
   }
   const t1 = (typeof performance !== 'undefined') ? performance.now() : 0
 
@@ -260,31 +281,29 @@ const pumpAudio = (): void => {
   const { r: rTelemetry, w: wTelemetry } = (writer as unknown as { debugRW: () => { r: number; w: number } }).debugRW()
   postStatsIfDue(producedTotal, occNow, t0, t1, { occProd: prodOcc, r: rTelemetry, w: wTelemetry })
 
-  // If far below target (underrun risk), schedule a micro backfill
-  if (occNow < (targetFillFrames >> 1) && freeNow > 0) {
+  // If below target, schedule a micro backfill ASAP; otherwise next interval pump will handle it
+  if (occNow < fillTarget && freeNow > 0) {
     setTimeout(pumpAudio, 0)
   }
 }
 
-// Note: CPU stepping is driven by pumpAudio()/generateInto().
-// Do NOT step CPU here, to avoid time-quantization artifacts in audio.
-// We only ship a frame if the PPU reports a new frame since the last send.
-const stepOneFrame = (): void => { /* no-op: preserved for reference */ }
+// CPU/PPU advance is primarily driven by audio generation (generateInto).
+// Keep this a no-op to avoid long blocking loops on the worker event loop.
+const stepOneFrame = (): void => { /* no-op */ }
 
 const sendVideoFrame = (): void => {
   if (!sys) return
   const cur = (sys.ppu as unknown as { frame: number }).frame | 0
   if (cur === lastPpuFrameSent) return
   const fb = (sys.ppu as unknown as { getFrameBuffer: () => Uint8Array }).getFrameBuffer()
-  // Transfer palette indices buffer to main; main will colorize
   const buf = new Uint8Array(fb)
   ;(postMessage as (msg: unknown, transfer?: Transferable[]) => void)({ type: 'ppu-frame', w: 256, h: 240, indices: buf }, [buf.buffer])
   lastPpuFrameSent = cur
 }
 
 const startLoops = (): void => {
-  // Use moderate audio pump interval for stability
-  if (audioTimer == null) audioTimer = (setInterval(pumpAudio, 3) as unknown as number)
+  // Use frequent, short audio pumps for stability; browsers clamp timers, but 2ms target is fine
+  if (audioTimer == null) audioTimer = (setInterval(pumpAudio, 2) as unknown as number)
   if (videoTimer == null) videoTimer = (setInterval(sendVideoFrame, 1000 / 60) as unknown as number)
 }
 

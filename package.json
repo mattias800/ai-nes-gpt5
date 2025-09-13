@@ -22,6 +22,7 @@
     "format": "prettier --write .",
     "fetch:roms": "node scripts/fetch-roms.mjs",
     "screenshot": "SCREENSHOT=1 vitest run tests/slow/harness/screenshot.test.ts",
+    "gif": "tsx -r tsconfig-paths/register scripts/make-gif.ts",
     "baseline:smb": "node scripts/gen-smb-baseline.mjs",
     "baseline:smb3": "node scripts/gen-smb3-baseline.mjs",
     "baseline:smb3:state": "node scripts/gen-smb3-state-baseline.mjs",

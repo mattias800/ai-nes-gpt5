@@ -1,6 +1,14 @@
 import { NES_PALETTE } from './palette'
 import { createAudioSAB } from './audio/shared-ring-buffer'
 
+// Query flags (must be defined before using fastDraw to create canvas context)
+const query = new URL(window.location.href).searchParams
+const statsEnabled = query.get('stats') === '1'
+const forceNoAudio = query.get('noaudio') === '1'
+const fastDraw = query.get('fastdraw') === '1'
+const lowLat = query.get('lowlat') === '1'
+const fillParam = (() => { const v = Number(query.get('fill')); return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0 })()
+
 // Prefer SAB (COOP/COEP) for low-latency audio, but fall back to video-only when unavailable
 const sabAvailable = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated) && (typeof SharedArrayBuffer !== 'undefined')
 if (!sabAvailable) {
@@ -18,7 +26,7 @@ if (!sabAvailable) {
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
 
 const canvas = $('#screen') as HTMLCanvasElement
-const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true } as any)!
+const ctx = canvas.getContext('2d', { alpha: false, desynchronized: fastDraw } as any)!
 const statusEl = $('#status') as HTMLSpanElement
 const startBtn = $('#start') as HTMLButtonElement
 const pauseBtn = $('#pause') as HTMLButtonElement
@@ -38,9 +46,6 @@ let framesReceived = 0
 let lastFrameTs = 0
 let lastWorkletStatsTs = 0
 
-const query = new URL(window.location.href).searchParams
-const statsEnabled = query.get('stats') === '1'
-const forceNoAudio = query.get('noaudio') === '1'
 
 // Stats overlay
 interface StatsOverlay { root: HTMLElement; set: (k: string, v: string) => void }
@@ -92,15 +97,16 @@ const setupAudio = async (): Promise<void> => {
 
 const startAudioGraph = (): { sab: ReturnType<typeof createAudioSAB> } => {
   const ctxA = audioCtx!
-  const channels = 2
-  const sab = createAudioSAB({ capacityFrames: 16384, channels })
+  const ringChannels = 1 // mono ring (APU is mono); worklet duplicates to stereo output
+  const outputChannels = 2
+  const sab = createAudioSAB({ capacityFrames: 16384, channels: ringChannels })
   
   // Create worklet and provide SAB in processorOptions so it's bound before the first process() call
   workletNode = new AudioWorkletNode(ctxA, 'nes-audio-processor', {
     numberOfInputs: 0,
     numberOfOutputs: 1,
-    outputChannelCount: [channels],
-    channelCount: channels,
+    outputChannelCount: [outputChannels],
+    channelCount: outputChannels,
     channelCountMode: 'explicit',
     channelInterpretation: 'speakers',
     processorOptions: { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 },
@@ -300,17 +306,16 @@ startBtn.addEventListener('click', async (): Promise<void> => {
       newFrameAvailable = true
       framesReceived++
       lastFrameTs = performance.now()
-      // Draw immediately as a fallback to ensure visible output even if RAF is delayed
-      drawLatest()
-      newFrameAvailable = false
+      // Fast-draw path: draw immediately to minimize latency (may tear)
+      if (fastDraw) { drawLatest(); newFrameAvailable = false }
     } else if (d.type === 'worker-stats') {
-      onStats(d)
     } else if (d.type === 'audio-chunk' && legacyNode) {
       const arr = new Float32Array(d.samples)
       legacyNode.port.postMessage({ type: 'samples', data: arr }, [arr.buffer])
     }
   }
-  worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 } : null, sampleRate, channels, targetFillFrames: 2048, noAudio: !sab })
+  const targetFillFrames = fillParam > 0 ? fillParam : (lowLat ? 768 : 1024)
+  worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 } : null, sampleRate, channels: 1, targetFillFrames, noAudio: !sab })
   worker.onerror = (ev: ErrorEvent): void => { console.error('[worker] error', ev.message, ev.error) }
   worker.onmessageerror = (ev: MessageEvent): void => { console.error('[worker] messageerror', ev.data) }
   // Load ROM and start (send a copy so we retain our local ROM for possible fallback)
@@ -352,8 +357,7 @@ startBtn.addEventListener('click', async (): Promise<void> => {
             newFrameAvailable = true
             framesReceived++
             lastFrameTs = performance.now()
-            drawLatest()
-            newFrameAvailable = false
+            if (fastDraw) { drawLatest(); newFrameAvailable = false }
           }
         }
         worker.postMessage({ type: 'init', sab: null, sampleRate: 48000, channels: 1, targetFillFrames: 2048, noAudio: true })

@@ -423,9 +423,10 @@ startBtn.addEventListener('click', async (): Promise<void> => {
       lastFrameTs = performance.now()
       // Fast-draw path: draw immediately to minimize latency (may tear)
       if (fastDraw) { drawLatest(); newFrameAvailable = false }
-    } else if (d.type === 'worker-stats') {
-    } else if (d.type === 'audio-chunk' && legacyNode) {
-      const arr = new Float32Array(d.samples)
+  } else if (d.type === 'worker-stats') {
+  } else if (d.type === 'audio-chunk' && legacyNode) {
+      // samples is a transferable Float32Array; forward it directly without copying
+      const arr = d.samples as Float32Array
       legacyNode.port.postMessage({ type: 'samples', data: arr }, [arr.buffer])
     }
   }

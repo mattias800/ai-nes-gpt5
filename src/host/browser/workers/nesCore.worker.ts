@@ -30,6 +30,9 @@ let lastPpuFrameSent = -1
 let targetFillFrames = 4096
 let noAudio = false
 let useLegacy = false
+// Legacy path cadence (adjusted on init based on sampleRate)
+let legacyChunkFrames = 1024
+let legacyPumpMs = 23
 // Debug logging gate (off by default)
 let debugAudio = false
 
@@ -181,12 +184,12 @@ let lastPumpTs = (typeof performance !== 'undefined') ? performance.now() : 0
 const pumpAudio = (): void => {
   if (!run || !sys) return
   if (useLegacy) {
-    // Generate a small chunk and post to main
-    const frames = 512
+    // Generate one chunk per pump and send to main; allocate a fresh buffer and transfer it
+    const frames = legacyChunkFrames | 0
     const ch = Math.max(1, channels|0)
-    if (!legacyChunk || legacyChunk.length < (frames * ch)) legacyChunk = new Float32Array(frames * ch)
-    generateInto(frames, legacyChunk)
-    ;(postMessage as (m: unknown, t?: Transferable[]) => void)({ type: 'audio-chunk', samples: legacyChunk }, [legacyChunk.buffer])
+    const out = new Float32Array(frames * ch)
+    generateInto(frames, out)
+    ;(postMessage as (m: unknown, t?: Transferable[]) => void)({ type: 'audio-chunk', samples: out }, [out.buffer])
     return
   }
   if (!writer) return
@@ -302,8 +305,9 @@ const sendVideoFrame = (): void => {
 }
 
 const startLoops = (): void => {
-  // Use frequent, short audio pumps for stability; browsers clamp timers, but 2ms target is fine
-  if (audioTimer == null) audioTimer = (setInterval(pumpAudio, 2) as unknown as number)
+  // SAB path: very frequent, short pumps; legacy: pump at chunk cadence to reduce overhead
+  const audioInterval = useLegacy ? Math.max(10, legacyPumpMs | 0) : 2
+  if (audioTimer == null) audioTimer = (setInterval(pumpAudio, audioInterval) as unknown as number)
   if (videoTimer == null) videoTimer = (setInterval(sendVideoFrame, 1000 / 60) as unknown as number)
 }
 
@@ -326,6 +330,8 @@ const handleMessage = (e: MessageEvent<Msg>): void => {
       sampleRate = msg.sampleRate|0
       channels = msg.channels|0
       targetFillFrames = msg.targetFillFrames|0
+      // Derive legacy cadence from sample rate
+      legacyPumpMs = Math.max(10, Math.floor((legacyChunkFrames * 1000) / Math.max(1, sampleRate)))
       // Allocate scratch based on channels
       scratch = new Float32Array(maxChunkFrames * channels)
       

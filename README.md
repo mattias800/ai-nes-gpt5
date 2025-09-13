@@ -1,5 +1,7 @@
 # ai-nes-gpt5 — NES emulator (TypeScript), accuracy-first, fully automated
 
+Live demo: https://mattias800.github.io/ai-nes-gpt5/
+
 Authorship & purpose (AI-generated)
 - Purpose: this repository exists to test whether AI can autonomously create an accurate NES emulator and surrounding tooling. The goal was not for a human to handcraft an emulator, but to evaluate AI capabilities end‑to‑end.
 - Authors: gpt-5 (high reasoning), opus 4, Cursor Auto

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ai-nes-gpt5 — Browser Host</title>
+    <script type="module" crossorigin src="/ai-nes-gpt5/assets/index-DApKq4lO.js"></script>
+    <link rel="stylesheet" crossorigin href="/ai-nes-gpt5/assets/index-BGc4gjW_.css">
+  </head>
+  <body>
+    <div class="app">
+      <header class="toolbar">
+        <div class="brand">
+          <div class="logo" aria-hidden="true">▲</div>
+          <h1 class="title">ai-nes-gpt5</h1>
+          <div class="subtitle">Browser Host</div>
+        </div>
+        <div class="actions">
+          <!-- Keep the original input; style and trigger via label -->
+          <input id="rom" type="file" accept=".nes" class="visually-hidden" />
+          <label for="rom" class="btn primary" title="Open a .nes file">Open ROM</label>
+
+          <button id="start" class="btn" disabled>Start</button>
+          <button id="pause" class="btn" disabled>Pause</button>
+          <button id="fs-btn" class="btn ghost" title="Toggle fullscreen" aria-pressed="false">Fullscreen</button>
+          <button id="help-btn" class="btn ghost" title="Keyboard help" aria-controls="help-modal" aria-expanded="false">Help</button>
+          <span id="pad-ind" class="pad-ind muted" aria-live="polite" aria-atomic="true" title="Gamepad status">🎮 Not connected</span>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="panel screen-panel" aria-label="Display">
+          <div class="screen-wrap">
+            <canvas id="screen" width="256" height="240"></canvas>
+          </div>
+        </section>
+
+        <aside class="panel controls" aria-label="Controls">
+          <div class="control-row">
+            <label class="control-label" for="volume">Volume</label>
+            <input id="volume" type="range" min="0" max="100" value="25" />
+            <span id="volumeLabel" class="muted">25%</span>
+          </div>
+          <div class="control-row">
+            <label class="control-label" for="scale-control">Scale</label>
+            <select id="scale-control">
+              <option value="1">1x</option>
+              <option value="2" selected>2x</option>
+              <option value="3">3x</option>
+              <option value="4">4x</option>
+              <option value="5">5x</option>
+              <option value="6">6x</option>
+            </select>
+            <label class="fit-toggle"><input id="scale-fit" type="checkbox" /> <span>Fit</span></label>
+          </div>
+
+          <div class="control-row toggles">
+            <label><input id="opt-stats" type="checkbox" /> <span>Stats overlay</span></label>
+            <label><input id="opt-fastdraw" type="checkbox" /> <span>Fast draw</span></label>
+            <label><input id="opt-lowlat" type="checkbox" /> <span>Low-latency audio</span></label>
+            <label><input id="opt-noaudio" type="checkbox" /> <span>No audio</span></label>
+          </div>
+          <div id="game-info" class="info-card">
+            <div class="info-header">Game Info</div>
+            <div class="info-body muted">Load a .nes file to see details.</div>
+          </div>
+
+          <p class="note">Note: Low-latency and No audio apply on next Start.</p>
+        </aside>
+      </main>
+
+      <footer class="status-bar" aria-live="polite" aria-atomic="true">
+        <span class="status-label">Status</span>
+        <span id="status" class="status-text">Load a .nes file</span>
+      </footer>
+
+      <!-- Keyboard help modal (UI-only) -->
+      <div id="help-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="help-title">
+        <div class="modal-card">
+          <div class="modal-header">
+            <h2 id="help-title">Keyboard</h2>
+            <button class="btn icon" id="help-close" aria-label="Close help">✕</button>
+          </div>
+          <div class="modal-body">
+            <ul class="kbd-list">
+              <li><span class="kbd">Z</span> = A</li>
+              <li><span class="kbd">X</span> = B</li>
+              <li><span class="kbd">Enter</span> = Start</li>
+              <li><span class="kbd">Shift</span> = Select</li>
+              <li><span class="kbd">↑ ↓ ← →</span> = D‑Pad</li>
+            </ul>
+            <p class="muted">Tip: Enable the <strong>Stats overlay</strong> to view audio/video diagnostics.</p>
+          </div>
+        </div>
+      </div>
+      <div id="dropzone" class="dropzone hidden" aria-hidden="true">
+        <div class="drop-card">
+          <div class="drop-icon">⬇</div>
+          <div class="drop-text">Drop ROM to load</div>
+          <div class="drop-hint">or click <strong>Open ROM</strong> above</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- UI-only script (does not touch emulator harness) -->
+    <!-- Emulator harness (unchanged) -->
+  </body>
+</html>
+

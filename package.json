@@ -15,7 +15,7 @@
       "build:host": "vite build",
       "preview": "vite preview",
       "predeploy": "cross-env GITHUB_PAGES=1 vite build",
-      "deploy": "gh-pages -d dist -b gh-pages",
+      "deploy": "gh-pages -d src/host/browser/dist -b gh-pages",
       "test:watch": "vitest",
     "test:long-run": "LONG_RUN=1 vitest run tests/harness/long_run_mario.test.ts",
     "test:long-run-deep": "LONG_RUN=1 vitest run tests/harness/long_run_mario_deep.test.ts",

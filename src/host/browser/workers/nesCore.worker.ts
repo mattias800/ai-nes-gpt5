@@ -13,8 +13,9 @@ interface LoadRomMsg { type: 'load_rom'; rom: Uint8Array; useVT: boolean; strict
 interface StartMsg { type: 'start' }
 interface PauseMsg { type: 'pause' }
 interface InputMsg { type: 'input'; code: string; down: boolean }
+interface SetDebugMsg { type: 'set-debug'; enabled: boolean }
 
-type Msg = InitMsg | LoadRomMsg | StartMsg | PauseMsg | InputMsg
+type Msg = InitMsg | LoadRomMsg | StartMsg | PauseMsg | InputMsg | SetDebugMsg
 
 let sys: NESSystem | null = null
 let writer = null as ReturnType<typeof getWriter> | null
@@ -25,9 +26,12 @@ let run = false
 let useBlep = false
 let audioTimer: number | null = null
 let videoTimer: number | null = null
+let lastPpuFrameSent = -1
 let targetFillFrames = 4096
 let noAudio = false
 let useLegacy = false
+// Debug logging gate (off by default)
+let debugAudio = false
 
 // Monitor whether audio ring is draining; if not, notify main to fallback
 let drainMonitor: number | null = null
@@ -187,42 +191,34 @@ const pumpAudio = (): void => {
   if (!writer) return
   
   pumpCount++
-  if (pumpCount % 1000 === 0) {
-    console.log('[worker] pumpAudio called', pumpCount, 'times, writer exists:', !!writer)
+  if (debugAudio && (pumpCount % 2000 === 0)) {
+    // Rare heartbeat log for debugging only
+    console.log('[worker] pumpAudio heartbeat', pumpCount)
   }
   
   // Initialize audio state if needed
   if (state.lastCycles === 0) { 
     state.lastCycles = sys.cpu.state.cycles; 
     state.targetCycles = state.lastCycles 
-    console.log('[worker] audio state initialized, cycles:', state.lastCycles)
+    if (debugAudio) console.log('[worker] audio state initialized, cycles:', state.lastCycles)
   }
   
-  // Calculate occupancy using writer.debugRW() but ensure consistent timing
+  // Calculate occupancy and free space using writer helpers
   let r, w, occNow, freeNow
   try {
     const debug = writer.debugRW()
     r = debug.r
     w = debug.w
-    const capacity = 16384
-    occNow = ((w - r + capacity) % capacity) | 0
+    occNow = writer.occupancy()
     freeNow = writer.freeSpace()
   } catch (e) {
-    console.error('[worker] debugRW failed:', e)
+    if (debugAudio) console.error('[worker] debugRW failed:', e)
     return
-  }
-  
-  // Debug: log free space occasionally
-  if (pumpCount % 500 === 0) {
-    console.log('[worker] freeSpace:', freeNow, 'audioQuantum:', audioQuantum, 'occNow:', occNow, 'targetFillFrames:', targetFillFrames, 'r:', r, 'w:', w)
-    // Also log the writer.occupancy() to compare
-    const writerOcc = writer.occupancy()
-    console.log('[worker] writer.occupancy():', writerOcc, 'manual calc:', occNow)
   }
   
   // Only produce if we have reasonable free space
   if (freeNow < audioQuantum) {
-    if (pumpCount % 1000 === 0) {
+    if (debugAudio && (pumpCount % 2000 === 0)) {
       console.log('[worker] skipping pump - insufficient free space:', freeNow, 'need:', audioQuantum)
     }
     return
@@ -234,36 +230,30 @@ const pumpAudio = (): void => {
   let bursts = 0
   let producedTotal = 0
   
+  // Aim to keep buffer around ~65% full to ensure steady CPU/PPU progression
+  const fillTarget = Math.max(audioQuantum, Math.floor(targetFillFrames * 0.65))
+
   // Produce audio in smaller, more frequent bursts for stability
-  while (occNow < (targetFillFrames - audioQuantum) && freeNow >= audioQuantum && bursts < 5) {
-    const desired = Math.min(freeNow, Math.max(0, targetFillFrames - occNow))
-    const toProduce = Math.max(audioQuantum, Math.min(128, desired)) // Even smaller burst size
+  while (occNow < fillTarget && freeNow >= audioQuantum && bursts < 3) {
+    const desired = Math.min(freeNow, Math.max(0, fillTarget - occNow))
+    const toProduce = Math.max(audioQuantum, Math.min(128, desired))
     const buf = scratch.subarray(0, toProduce * channels)
     generateInto(toProduce, buf)
     
-    // Debug: log before write
-    if (pumpCount % 500 === 0) {
-      console.log('[worker] about to write, toProduce:', toProduce, 'freeNow:', freeNow, 'occNow:', occNow)
-    }
-    
     const written = writer.write(buf)
     if (written === 0) {
-      console.warn('[worker] failed to write audio data, freeSpace:', freeNow, 'toProduce:', toProduce)
+      if (debugAudio) console.warn('[worker] failed to write audio data, freeSpace:', freeNow, 'toProduce:', toProduce)
       break
-    } else if (pumpCount % 1000 === 0) {
-      console.log('[worker] wrote', written, 'frames, toProduce:', toProduce, 'occNow:', occNow)
     }
     producedTotal += toProduce
     occNow = writer.occupancy()
     freeNow = writer.freeSpace()
     bursts++
-    
-    // Debug: log every 100th write to see if data is being written
-    if (producedTotal % 1000 === 0) {
-      console.log('[worker] wrote', producedTotal, 'frames, occ:', occNow, 'free:', freeNow)
-    }
   }
   const t1 = (typeof performance !== 'undefined') ? performance.now() : 0
+
+  // After producing audio, opportunistically ship a video frame if a new one is ready
+  try { sendVideoFrame() } catch {}
 
   // Telemetry (include producer view and R/W)
   const prodOcc = occNow // Use the same occupancy calculation
@@ -276,22 +266,20 @@ const pumpAudio = (): void => {
   }
 }
 
-const stepOneFrame = (): void => {
-  if (!sys) return
-  const start = sys.ppu.frame
-  let guard = 0
-  // Hard cap to avoid runaway if something goes wrong; typical SMB frames need ~30k CPU cycles
-  while (sys.ppu.frame === start && guard < 20_000_000) { sys.stepInstruction(); guard++ }
-}
+// Note: CPU stepping is driven by pumpAudio()/generateInto().
+// Do NOT step CPU here, to avoid time-quantization artifacts in audio.
+// We only ship a frame if the PPU reports a new frame since the last send.
+const stepOneFrame = (): void => { /* no-op: preserved for reference */ }
 
 const sendVideoFrame = (): void => {
   if (!sys) return
-  // Always advance video frame regardless of audio state to prevent grey screen
-  stepOneFrame()
+  const cur = (sys.ppu as unknown as { frame: number }).frame | 0
+  if (cur === lastPpuFrameSent) return
   const fb = (sys.ppu as unknown as { getFrameBuffer: () => Uint8Array }).getFrameBuffer()
   // Transfer palette indices buffer to main; main will colorize
   const buf = new Uint8Array(fb)
   ;(postMessage as (msg: unknown, transfer?: Transferable[]) => void)({ type: 'ppu-frame', w: 256, h: 240, indices: buf }, [buf.buffer])
+  lastPpuFrameSent = cur
 }
 
 const startLoops = (): void => {
@@ -308,6 +296,10 @@ const stopLoops = (): void => {
 const handleMessage = (e: MessageEvent<Msg>): void => {
   const msg = e.data
   switch (msg.type) {
+    case 'set-debug': {
+      debugAudio = !!msg.enabled
+      break
+    }
     case 'init': {
       noAudio = !!msg.noAudio
       useLegacy = !!msg.useLegacy
@@ -324,11 +316,11 @@ const handleMessage = (e: MessageEvent<Msg>): void => {
         console.log('[worker] initial SAB state: r:', r, 'w:', w, 'occ:', writer.occupancy(), 'free:', writer.freeSpace())
       }
       
-      // Temporarily disable drain monitor to debug stall issue
+      // Drain monitor disabled: do not auto-fallback; remain on SAB path
       // if (writer && !noAudio && !useLegacy) startDrainMonitor()
       break
     }
-    case 'load_rom': {
+case 'load_rom': {
       const rom = parseINes(msg.rom)
       sys = new NESSystem(rom)
       ;(sys.ppu as unknown as { setTimingMode?: (m: 'vt'|'legacy') => void }).setTimingMode?.(msg.useVT ? 'vt' : 'legacy')
@@ -348,6 +340,7 @@ const handleMessage = (e: MessageEvent<Msg>): void => {
       state.lastCycles = 0; state.targetCycles = 0
       // Reset DC blocker state
       dcPrevIn = 0; dcPrevOut = 0
+      lastPpuFrameSent = -1
       break
     }
 case 'start': {
@@ -367,7 +360,7 @@ case 'start': {
         }
       }
       startLoops()
-      // Temporarily disable drain monitor to debug stall issue
+      // Drain monitor disabled: do not auto-fallback; remain on SAB path
       // if (!useLegacy && writer && !noAudio) startDrainMonitor()
       break
     }

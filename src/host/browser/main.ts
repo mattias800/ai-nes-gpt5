@@ -95,7 +95,7 @@ const startAudioGraph = (): { sab: ReturnType<typeof createAudioSAB> } => {
   const channels = 2
   const sab = createAudioSAB({ capacityFrames: 16384, channels })
   
-  // Create worklet without SAB in constructor to avoid timing issues
+  // Create worklet and provide SAB in processorOptions so it's bound before the first process() call
   workletNode = new AudioWorkletNode(ctxA, 'nes-audio-processor', {
     numberOfInputs: 0,
     numberOfOutputs: 1,
@@ -103,15 +103,15 @@ const startAudioGraph = (): { sab: ReturnType<typeof createAudioSAB> } => {
     channelCount: channels,
     channelCountMode: 'explicit',
     channelInterpretation: 'speakers',
+    processorOptions: { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 },
   } as any)
   
   workletNode.port.onmessage = (ev: MessageEvent) => {
     const d = ev.data
     if (d?.type === 'worklet-ready') {
-      console.log('[audio] worklet-ready, sending SAB')
-      // Send SAB binding after readiness
+      // Worklet may already be bound via processorOptions; keep idempotent set-sab as a fallback
       try {
-        workletNode!.port.postMessage({ type: 'set-sab', controlSAB: sab.controlSAB, dataSAB: sab.dataSAB })
+        workletNode!.port.postMessage({ type: 'set-sab', controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 })
       } catch (e) {
         console.warn('[audio] failed to post set-sab:', e)
       }
@@ -125,8 +125,10 @@ const startAudioGraph = (): { sab: ReturnType<typeof createAudioSAB> } => {
     }
   }
   
-  // Enable stats and connect audio graph
-  workletNode.port.postMessage({ type: 'enable-stats', value: true })
+  // Enable stats only if requested via ?stats=1
+  if (statsEnabled) {
+    workletNode.port.postMessage({ type: 'enable-stats', value: true })
+  }
   gainNode = new GainNode(ctxA, { gain: 0.25 })
   workletNode.connect(gainNode)
   gainNode.connect(ctxA.destination)
@@ -303,15 +305,12 @@ startBtn.addEventListener('click', async (): Promise<void> => {
       newFrameAvailable = false
     } else if (d.type === 'worker-stats') {
       onStats(d)
-    } else if (d.type === 'audio-stall') {
-      console.warn('[audio] worker reported stall; switching to legacy audio fallback')
-      void fallbackToLegacyAudio('worker-reported stall')
     } else if (d.type === 'audio-chunk' && legacyNode) {
       const arr = new Float32Array(d.samples)
       legacyNode.port.postMessage({ type: 'samples', data: arr }, [arr.buffer])
     }
   }
-  worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB } : null, sampleRate, channels, targetFillFrames: 4096, noAudio: !sab })
+  worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 } : null, sampleRate, channels, targetFillFrames: 2048, noAudio: !sab })
   worker.onerror = (ev: ErrorEvent): void => { console.error('[worker] error', ev.message, ev.error) }
   worker.onmessageerror = (ev: MessageEvent): void => { console.error('[worker] messageerror', ev.data) }
   // Load ROM and start (send a copy so we retain our local ROM for possible fallback)

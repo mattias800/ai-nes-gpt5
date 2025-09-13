@@ -1,5 +1,5 @@
 // AudioWorkletProcessor that reads from a SharedArrayBuffer ring buffer.
-// Note: AudioWorklet runs in its own global scope (no DOM). Keep it allocation-free.
+// Note: AudioWorklet runs in its own global scope (no DOM). Keep it allocation-free and avoid any logging in process().
 
 // Header indices (must match shared-ring-buffer.ts)
 const H = {
@@ -29,11 +29,15 @@ class NesAudioProcessor extends AudioWorkletProcessor {
   constructor(options: { processorOptions?: { controlSAB: SharedArrayBuffer, dataSAB: SharedArrayBuffer } }) {
     super();
     try {
-      const sab = options?.processorOptions || {} as { controlSAB: SharedArrayBuffer, dataSAB: SharedArrayBuffer };
+      const sab = options?.processorOptions || {} as { controlSAB: SharedArrayBuffer, dataSAB: SharedArrayBuffer, dataByteOffset?: number };
       this._control = new Int32Array(sab.controlSAB);
-      this._data = new Float32Array(sab.dataSAB);
-      this._capacity = this._control[H.Capacity] | 0;
-      this._ringChannels = this._control[H.Channels] | 0; // 1 or 2
+      // Map data with optional byteOffset to support single-SAB layouts
+      const cap = (this._control[H.Capacity] | 0) >>> 0;
+      const ch = (this._control[H.Channels] | 0) >>> 0;
+      const length = Math.max(0, cap * ch);
+      this._data = new Float32Array(sab.dataSAB, (sab as any).dataByteOffset ?? 0, length);
+      this._capacity = cap;
+      this._ringChannels = ch; // 1 or 2
     } catch (e) {
       // If constructor fails to map SAB, notify main thread for diagnostics
       try { this.port.postMessage({ type: 'worklet-error', message: (e as Error)?.message || String(e) }) } catch {}
@@ -53,7 +57,7 @@ class NesAudioProcessor extends AudioWorkletProcessor {
 
     // Allow enabling via message from main
     this.port.onmessage = (ev: MessageEvent) => {
-      const d: any = ev.data;
+      const d = ev.data as { type?: string; value?: unknown; controlSAB?: SharedArrayBuffer; dataSAB?: SharedArrayBuffer } | null;
       if (!d) return;
       if (d.type === 'enable-stats') {
         this._statsEnabled = !!d.value;
@@ -62,13 +66,15 @@ class NesAudioProcessor extends AudioWorkletProcessor {
         try {
           // Rebind to SABs provided after node creation
           this._control = new Int32Array(d.controlSAB as SharedArrayBuffer);
-          this._data = new Float32Array(d.dataSAB as SharedArrayBuffer);
-          this._capacity = this._control[H.Capacity] | 0;
-          this._ringChannels = this._control[H.Channels] | 0;
-          console.log('[worklet] SAB set, capacity:', this._capacity, 'channels:', this._ringChannels);
+          const cap = (this._control[H.Capacity] | 0) >>> 0;
+          const ch = (this._control[H.Channels] | 0) >>> 0;
+          const length = Math.max(0, cap * ch);
+          const byteOffset = (d as any).dataByteOffset ?? 0;
+          this._data = new Float32Array(d.dataSAB as SharedArrayBuffer, byteOffset, length);
+          this._capacity = cap;
+          this._ringChannels = ch;
           try { this.port.postMessage({ type: 'worklet-ack', what: 'set-sab', cap: this._capacity, ch: this._ringChannels }) } catch {}
         } catch (e) {
-          console.error('[worklet] SAB setup failed:', e);
           try { this.port.postMessage({ type: 'worklet-error', what: 'set-sab', message: (e as Error)?.message || String(e) }) } catch {}
         }
       }
@@ -83,11 +89,6 @@ class NesAudioProcessor extends AudioWorkletProcessor {
     const out = outputs[0]; // array of channels
     const frames = out[0].length | 0;
     const channelsOut = out.length | 0;
-    
-    // Debug: log when worklet is called
-    if (this._statsEnabled && Math.random() < 0.1) {
-      console.log('[worklet] process called, frames:', frames, 'channels:', channelsOut);
-    }
 
     // Guard against invalid state
     if (this._capacity <= 0 || this._ringChannels <= 0) {
@@ -103,11 +104,6 @@ class NesAudioProcessor extends AudioWorkletProcessor {
     const w = Atomics.load(this._control, H.WriteIdx) | 0;
     const occ = ((w - r + this._capacity) % this._capacity) | 0;
     const toRead = (occ < frames ? occ : frames) | 0;
-    
-    // Debug logging (only occasionally to avoid spam)
-    if (this._statsEnabled && Math.random() < 0.01) {
-      console.log('[worklet] r:', r, 'w:', w, 'occ:', occ, 'toRead:', toRead, 'frames:', frames, 'capacity:', this._capacity);
-    }
 
     // Copy from interleaved ring buffer to planar outputs
     let readIdx = r;
@@ -134,7 +130,8 @@ class NesAudioProcessor extends AudioWorkletProcessor {
     // Publish new read index and last occupancy
     Atomics.store(this._control, H.ReadIdx, readIdx);
     const newR = readIdx | 0;
-    const newOcc = ((Atomics.load(this._control, H.WriteIdx) | 0 - newR + this._capacity) % this._capacity) | 0;
+    const wNow = (Atomics.load(this._control, H.WriteIdx) | 0);
+    const newOcc = (((wNow - newR + this._capacity) % this._capacity) | 0);
     Atomics.store(this._control, H.LastOccupancy, newOcc);
 
     // Telemetry: track occupancy and post periodically
@@ -148,7 +145,7 @@ class NesAudioProcessor extends AudioWorkletProcessor {
         // Include debug snapshot
         const rDbg = Atomics.load(this._control, H.ReadIdx) | 0;
         const wDbg = Atomics.load(this._control, H.WriteIdx) | 0;
-        this.port.postMessage({ type: 'worklet-stats', underruns, occMin: this._occMin, occAvg, occMax: this._occMax, sampleRate, r: rDbg, w: wDbg, capacity: this._capacity, ringChannels: this._ringChannels });
+        try { this.port.postMessage({ type: 'worklet-stats', underruns, occMin: this._occMin, occAvg, occMax: this._occMax, sampleRate, r: rDbg, w: wDbg, capacity: this._capacity, ringChannels: this._ringChannels }) } catch {}
         this._lastPost = currentTime;
         this._occMin = Number.POSITIVE_INFINITY; this._occMax = 0; this._occSum = 0; this._occCount = 0;
       }

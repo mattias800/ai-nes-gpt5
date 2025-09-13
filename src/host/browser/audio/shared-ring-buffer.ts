@@ -6,6 +6,8 @@ export interface AudioRingBufferConfig { capacityFrames: number; channels: numbe
 export interface SabBundle {
   controlSAB: SharedArrayBuffer
   dataSAB: SharedArrayBuffer
+  // Byte offset within dataSAB where PCM data begins (allows header+data in one SAB)
+  dataByteOffset?: number
   capacityFrames: number
   channels: number
 }
@@ -24,8 +26,11 @@ export const H = {
 const HEADER_INT32_COUNT = 8 // room for future fields
 
 export const createAudioSAB = ({ capacityFrames, channels }: AudioRingBufferConfig): SabBundle => {
-  const controlSAB = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * HEADER_INT32_COUNT)
-  const control = new Int32Array(controlSAB)
+  // Allocate a single SAB for header + data to ensure proper release/acquire visibility
+  const headerBytes = Int32Array.BYTES_PER_ELEMENT * HEADER_INT32_COUNT
+  const dataBytes = Float32Array.BYTES_PER_ELEMENT * capacityFrames * channels
+  const sab = new SharedArrayBuffer(headerBytes + dataBytes)
+  const control = new Int32Array(sab, 0, HEADER_INT32_COUNT)
   control[H.ReadIdx] = 0
   control[H.WriteIdx] = 0
   control[H.Capacity] = capacityFrames|0
@@ -33,8 +38,9 @@ export const createAudioSAB = ({ capacityFrames, channels }: AudioRingBufferConf
   control[H.Underruns] = 0
   control[H.Overruns] = 0
   control[H.LastOccupancy] = 0
-  const dataSAB = new SharedArrayBuffer(Float32Array.BYTES_PER_ELEMENT * capacityFrames * channels)
-  return { controlSAB, dataSAB, capacityFrames, channels }
+  // Data immediately follows header
+  const dataByteOffset = headerBytes
+  return { controlSAB: sab, dataSAB: sab, dataByteOffset, capacityFrames, channels }
 }
 
 export interface RingBufferWriter {
@@ -47,7 +53,7 @@ export interface RingBufferWriter {
 
 export const getWriter = (bundle: SabBundle): RingBufferWriter => {
   const control = new Int32Array(bundle.controlSAB)
-  const data = new Float32Array(bundle.dataSAB)
+  const data = new Float32Array(bundle.dataSAB, (bundle.dataByteOffset ?? 0), (new Int32Array(bundle.controlSAB)[H.Capacity] | 0) * (new Int32Array(bundle.controlSAB)[H.Channels] | 0))
   const channels = control[H.Channels]|0
   const capacity = control[H.Capacity]|0
   const write = (src: Float32Array): number => {
@@ -79,13 +85,9 @@ export const getWriter = (bundle: SabBundle): RingBufferWriter => {
     const w = Atomics.load(control, H.WriteIdx)|0
     const occ = ((w - r + capacity) % capacity)|0
     const free = (capacity - 1 - occ)|0
-    // Debug: log occasionally
-    if (Math.random() < 0.001) {
-      console.log('[ring-buffer] r:', r, 'w:', w, 'occ:', occ, 'free:', free, 'capacity:', capacity)
-    }
     return free
   }
-  const occupancy = (): number => ((Atomics.load(control, H.WriteIdx)|0 - (Atomics.load(control, H.ReadIdx)|0) + capacity) % capacity)|0
+  const occupancy = (): number => ((((Atomics.load(control, H.WriteIdx) | 0) - (Atomics.load(control, H.ReadIdx) | 0) + capacity) % capacity) | 0)
   const consumerOccupancy = (): number => Atomics.load(control, H.LastOccupancy)|0
   const debugRW = (): { r: number; w: number } => ({ r: Atomics.load(control, H.ReadIdx)|0, w: Atomics.load(control, H.WriteIdx)|0 })
   return { write, freeSpace, occupancy, consumerOccupancy, debugRW }

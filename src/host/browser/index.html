@@ -25,6 +25,13 @@
       <input id="volume" type="range" min="0" max="100" value="25" />
       <span id="volumeLabel" class="small">25%</span>
     </div>
+    <div class="row">
+      <label><input id="opt-stats" type="checkbox" /> Stats overlay</label>
+      <label><input id="opt-fastdraw" type="checkbox" /> Fast draw</label>
+      <label><input id="opt-lowlat" type="checkbox" /> Low-latency audio</label>
+      <label><input id="opt-noaudio" type="checkbox" /> No audio</label>
+    </div>
+    <div class="row small">Note: Low-latency and No audio apply on next Start.</div>
     <canvas id="screen" width="256" height="240"></canvas>
 
     <script type="module" src="/main.ts"></script>

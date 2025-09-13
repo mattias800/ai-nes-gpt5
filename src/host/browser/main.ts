@@ -1,12 +1,12 @@
 import { NES_PALETTE } from './palette'
 import { createAudioSAB } from './audio/shared-ring-buffer'
 
-// Query flags (must be defined before using fastDraw to create canvas context)
+// Query flags (read once; UI controls take precedence)
 const query = new URL(window.location.href).searchParams
-const statsEnabled = query.get('stats') === '1'
-const forceNoAudio = query.get('noaudio') === '1'
-const fastDraw = query.get('fastdraw') === '1'
-const lowLat = query.get('lowlat') === '1'
+const defaultStatsEnabled = query.get('stats') === '1'
+const defaultForceNoAudio = query.get('noaudio') === '1'
+const defaultFastDraw = query.has('fastdraw') ? (query.get('fastdraw') === '1') : true
+const defaultLowLat = query.has('lowlat') ? (query.get('lowlat') === '1') : true
 const fillParam = (() => { const v = Number(query.get('fill')); return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0 })()
 
 // Prefer SAB (COOP/COEP) for low-latency audio, but fall back to video-only when unavailable
@@ -26,11 +26,31 @@ if (!sabAvailable) {
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector(sel) as T
 
 const canvas = $('#screen') as HTMLCanvasElement
-const ctx = canvas.getContext('2d', { alpha: false, desynchronized: fastDraw } as any)!
 const statusEl = $('#status') as HTMLSpanElement
 const startBtn = $('#start') as HTMLButtonElement
 const pauseBtn = $('#pause') as HTMLButtonElement
 const romInput = $('#rom') as HTMLInputElement
+const optStats = $('#opt-stats') as HTMLInputElement | null
+const optFastdraw = $('#opt-fastdraw') as HTMLInputElement | null
+const optLowlat = $('#opt-lowlat') as HTMLInputElement | null
+const optNoaudio = $('#opt-noaudio') as HTMLInputElement | null
+
+// Initialize UI controls from URL defaults
+if (optStats) optStats.checked = defaultStatsEnabled
+if (optFastdraw) optFastdraw.checked = defaultFastDraw
+if (optLowlat) optLowlat.checked = defaultLowLat
+if (optNoaudio) optNoaudio.checked = defaultForceNoAudio
+
+// Runtime options (mutable)
+let options = {
+  statsEnabled: optStats?.checked ?? defaultStatsEnabled,
+  forceNoAudio: optNoaudio?.checked ?? defaultForceNoAudio,
+  lowLat: optLowlat?.checked ?? defaultLowLat,
+}
+let fastDraw: boolean = optFastdraw?.checked ?? defaultFastDraw
+
+// Create drawing context using current fastDraw
+let ctx = canvas.getContext('2d', { alpha: false, desynchronized: fastDraw } as any)!
 
 let running = false
 let audioCtx: AudioContext | null = null
@@ -45,6 +65,32 @@ let audioWorkletLoaded = false
 let framesReceived = 0
 let lastFrameTs = 0
 let lastWorkletStatsTs = 0
+
+// Helpers to manage session lifecycle
+const teardownAudioGraph = (): void => {
+  try { workletNode?.disconnect() } catch {}
+  try { gainNode?.disconnect() } catch {}
+  try { legacyNode?.disconnect() } catch {}
+  workletNode = null
+  gainNode = null
+  legacyNode = null
+}
+const terminateWorker = (): void => {
+  try { worker?.terminate() } catch {}
+  worker = null
+}
+const resetPresentationState = (): void => {
+  latestFrame = null
+  newFrameAvailable = false
+  framesDrawn = 0
+  framesDropped = 0
+  framesReceived = 0
+  fpsCounter = 0
+  drawCostEMA = 0
+  lastFpsTs = performance.now()
+  lastWorkletStatsTs = 0
+  lastFrameTs = 0
+}
 
 
 // Stats overlay
@@ -62,7 +108,16 @@ const makeStatsOverlay = (): StatsOverlay => {
   document.body.appendChild(root)
   return { root, set }
 }
-const stats = statsEnabled ? makeStatsOverlay() : null
+let stats: StatsOverlay | null = null
+const setStatsEnabled = (enabled: boolean): void => {
+  if (enabled) {
+    if (!stats) stats = makeStatsOverlay()
+  } else {
+    if (stats) { stats.root.remove(); stats = null }
+  }
+  try { workletNode?.port.postMessage({ type: 'enable-stats', value: enabled }) } catch {}
+}
+setStatsEnabled(options.statsEnabled)
 const onStats = (data: any): void => {
   if (!stats) return
   if (data?.type === 'worker-stats' && data.audio) {
@@ -131,8 +186,8 @@ const startAudioGraph = (): { sab: ReturnType<typeof createAudioSAB> } => {
     }
   }
   
-  // Enable stats only if requested via ?stats=1
-  if (statsEnabled) {
+  // Enable stats if requested
+  if (options.statsEnabled) {
     workletNode.port.postMessage({ type: 'enable-stats', value: true })
   }
   gainNode = new GainNode(ctxA, { gain: 0.25 })
@@ -179,6 +234,11 @@ canvas.width = WIDTH
 canvas.height = HEIGHT
 let rgbaImage = ctx.createImageData(WIDTH, HEIGHT)
 let rgbaU32 = new Uint32Array(rgbaImage.data.buffer)
+const recreateContext = (): void => {
+  ctx = canvas.getContext('2d', { alpha: false, desynchronized: fastDraw } as any)!
+  rgbaImage = ctx.createImageData(WIDTH, HEIGHT)
+  rgbaU32 = new Uint32Array(rgbaImage.data.buffer)
+}
 const U32_PALETTE = (() => {
   const p = new Uint32Array(64)
   for (let i = 0; i < 64; i++) {
@@ -231,6 +291,24 @@ const presentLoop = (_ts: number): void => {
 }
 requestAnimationFrame(presentLoop)
 
+// Wire up UI toggles
+if (optStats) optStats.addEventListener('change', () => {
+  options.statsEnabled = optStats.checked
+  setStatsEnabled(options.statsEnabled)
+})
+if (optFastdraw) optFastdraw.addEventListener('change', () => {
+  fastDraw = optFastdraw.checked
+  recreateContext()
+})
+if (optLowlat) optLowlat.addEventListener('change', () => {
+  options.lowLat = optLowlat.checked
+  statusEl.textContent = `Low-latency audio ${options.lowLat ? 'enabled' : 'disabled'} (applies on next Start)`
+})
+if (optNoaudio) optNoaudio.addEventListener('change', () => {
+  options.forceNoAudio = optNoaudio.checked
+  statusEl.textContent = `No audio ${options.forceNoAudio ? 'enabled' : 'disabled'} (applies on next Start)`
+})
+
 // Keyboard -> controller mapping (send to worker)
 window.addEventListener('keydown', (ev: KeyboardEvent): void => {
   if (!worker) return
@@ -261,7 +339,8 @@ romInput.addEventListener('change', async (): Promise<void> => {
     const strict = params.get('strict') === '1'
     flags = { useVT, strict }
     startBtn.disabled = false
-    pauseBtn.disabled = true
+    // Keep Pause/Resume availability depending on current run state
+    pauseBtn.disabled = !running
     const regionParam = (params.get('region') || '').toLowerCase()
     const apuRegion: 'NTSC'|'PAL'|undefined = regionParam === 'pal' ? 'PAL' : (regionParam === 'ntsc' ? 'NTSC' : undefined)
     const timingParam = (params.get('apu_timing') || params.get('aputimings') || '').toLowerCase()
@@ -278,10 +357,14 @@ romInput.addEventListener('change', async (): Promise<void> => {
 
 startBtn.addEventListener('click', async (): Promise<void> => {
   if (!romBytes) return
+  // If a session is already running or paused, tear it down before starting new (or rebooting with new ROM)
+  terminateWorker()
+  teardownAudioGraph()
+  resetPresentationState()
   let sab: ReturnType<typeof createAudioSAB> | null = null
   let sampleRate = 48000
   const channels = 2
-  const wantAudio = sabAvailable && !forceNoAudio
+  const wantAudio = sabAvailable && !options.forceNoAudio
   if (wantAudio) {
     try {
       // Explicitly match device sampleRate to avoid resample mismatch; load worklet before creating node
@@ -314,7 +397,7 @@ startBtn.addEventListener('click', async (): Promise<void> => {
       legacyNode.port.postMessage({ type: 'samples', data: arr }, [arr.buffer])
     }
   }
-  const targetFillFrames = fillParam > 0 ? fillParam : (lowLat ? 768 : 1024)
+  const targetFillFrames = fillParam > 0 ? fillParam : (options.lowLat ? 768 : 1024)
   worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 } : null, sampleRate, channels: 1, targetFillFrames, noAudio: !sab })
   worker.onerror = (ev: ErrorEvent): void => { console.error('[worker] error', ev.message, ev.error) }
   worker.onmessageerror = (ev: MessageEvent): void => { console.error('[worker] messageerror', ev.data) }
@@ -327,15 +410,16 @@ startBtn.addEventListener('click', async (): Promise<void> => {
   running = true
   startBtn.disabled = true
   pauseBtn.disabled = false
+  pauseBtn.textContent = 'Pause'
   statusEl.textContent = sab ? 'Running' : 'Running (no audio)'
     // If no frames arrive shortly after start, surface a helpful status to aid debugging.
     const startCheckTs = performance.now()
     setTimeout((): void => {
       if (framesReceived === 0 && running && performance.now() - startCheckTs >= 1900) {
-        statusEl.textContent = 'No video frames received yet. Open with ?stats=1 and check console for worker errors.'
+        statusEl.textContent = 'No video frames received yet. Enable the Stats overlay and check the console for worker errors.'
       }
       // If audio was desired but no worklet stats have arrived and frames are stalled, fall back to video-only
-      if ((sabAvailable && !forceNoAudio) && (lastWorkletStatsTs < startCheckTs) && framesReceived <= 1 && running) {
+      if ((sabAvailable && !options.forceNoAudio) && (lastWorkletStatsTs < startCheckTs) && framesReceived <= 1 && running) {
         console.warn('[audio] suspected stall at startup; switching to legacy audio fallback')
         void fallbackToLegacyAudio('startup stall')
       }
@@ -372,11 +456,24 @@ startBtn.addEventListener('click', async (): Promise<void> => {
 })
 
 pauseBtn.addEventListener('click', (): void => {
-  running = false
-  startBtn.disabled = false
-  pauseBtn.disabled = true
-  statusEl.textContent = 'Paused'
-  worker?.postMessage({ type: 'pause' })
+  if (!worker) return
+  if (running) {
+    // Pause
+    running = false
+    startBtn.disabled = false
+    pauseBtn.disabled = false
+    pauseBtn.textContent = 'Resume'
+    statusEl.textContent = 'Paused'
+    worker.postMessage({ type: 'pause' })
+  } else {
+    // Resume current session
+    worker.postMessage({ type: 'start' })
+    running = true
+    startBtn.disabled = true
+    pauseBtn.disabled = false
+    pauseBtn.textContent = 'Pause'
+    statusEl.textContent = 'Running'
+  }
 })
 
 // Fallback: respawn in legacy audio mode if SAB-drain fails

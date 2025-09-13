@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>NES Audio Test</title>
+    <style>
+        body { font-family: system-ui; margin: 20px; background: #1e1e1e; color: #ddd; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #444; border-radius: 5px; }
+        .status { font-weight: bold; }
+        .pass { color: #4CAF50; }
+        .fail { color: #f44336; }
+        .info { color: #2196F3; }
+        button { padding: 10px 20px; margin: 5px; background: #333; color: #ddd; border: 1px solid #555; border-radius: 3px; cursor: pointer; }
+        button:hover { background: #444; }
+        button:disabled { background: #222; color: #666; cursor: not-allowed; }
+        #log { background: #000; color: #0f0; padding: 10px; font-family: monospace; font-size: 12px; height: 200px; overflow-y: auto; border: 1px solid #333; }
+    </style>
+</head>
+<body>
+    <h1>NES Audio System Test</h1>
+    
+    <div class="test-section">
+        <h3>Browser Compatibility</h3>
+        <div id="compat-status" class="status">Testing...</div>
+        <div id="compat-details"></div>
+    </div>
+    
+    <div class="test-section">
+        <h3>Audio Context Test</h3>
+        <button id="test-audio-context">Test Audio Context</button>
+        <div id="audio-context-status" class="status">Not tested</div>
+    </div>
+    
+    <div class="test-section">
+        <h3>SharedArrayBuffer Test</h3>
+        <button id="test-sab">Test SharedArrayBuffer</button>
+        <div id="sab-status" class="status">Not tested</div>
+    </div>
+    
+    <div class="test-section">
+        <h3>AudioWorklet Test</h3>
+        <button id="test-worklet">Test AudioWorklet</button>
+        <div id="worklet-status" class="status">Not tested</div>
+    </div>
+    
+    <div class="test-section">
+        <h3>Ring Buffer Test</h3>
+        <button id="test-ring-buffer">Test Ring Buffer</button>
+        <div id="ring-buffer-status" class="status">Not tested</div>
+    </div>
+    
+    <div class="test-section">
+        <h3>Test Log</h3>
+        <div id="log"></div>
+        <button id="clear-log">Clear Log</button>
+    </div>
+
+    <script type="module">
+        const log = (message, type = 'info') => {
+            const logEl = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            const color = type === 'error' ? '#f44336' : type === 'success' ? '#4CAF50' : '#2196F3';
+            logEl.innerHTML += `<div style="color: ${color}">[${timestamp}] ${message}</div>`;
+            logEl.scrollTop = logEl.scrollHeight;
+        };
+        
+        const setStatus = (id, message, type = 'info') => {
+            const el = document.getElementById(id);
+            el.textContent = message;
+            el.className = `status ${type}`;
+        };
+        
+        // Test browser compatibility
+        const testCompatibility = () => {
+            const features = {
+                'SharedArrayBuffer': typeof SharedArrayBuffer !== 'undefined',
+                'crossOriginIsolated': typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated,
+                'AudioContext': typeof AudioContext !== 'undefined',
+                'AudioWorkletNode': typeof AudioWorkletNode !== 'undefined',
+                'Worker': typeof Worker !== 'undefined',
+                'Atomics': typeof Atomics !== 'undefined'
+            };
+            
+            const allSupported = Object.values(features).every(Boolean);
+            const details = Object.entries(features)
+                .map(([name, supported]) => `${name}: ${supported ? '✓' : '✗'}`)
+                .join('<br>');
+            
+            setStatus('compat-status', allSupported ? 'All features supported' : 'Some features missing', 
+                     allSupported ? 'pass' : 'fail');
+            document.getElementById('compat-details').innerHTML = details;
+            
+            log(`Browser compatibility: ${allSupported ? 'PASS' : 'FAIL'}`);
+            Object.entries(features).forEach(([name, supported]) => {
+                log(`${name}: ${supported ? 'SUPPORTED' : 'NOT SUPPORTED'}`);
+            });
+        };
+        
+        // Test Audio Context
+        const testAudioContext = async () => {
+            try {
+                const ctx = new AudioContext({ sampleRate: 44100 });
+                log(`AudioContext created: sampleRate=${ctx.sampleRate}, state=${ctx.state}`);
+                
+                if (ctx.state === 'suspended') {
+                    await ctx.resume();
+                    log(`AudioContext resumed: state=${ctx.state}`);
+                }
+                
+                setStatus('audio-context-status', 'AudioContext working', 'pass');
+                log('AudioContext test: PASS');
+            } catch (error) {
+                setStatus('audio-context-status', `AudioContext failed: ${error.message}`, 'fail');
+                log(`AudioContext test: FAIL - ${error.message}`, 'error');
+            }
+        };
+        
+        // Test SharedArrayBuffer
+        const testSharedArrayBuffer = () => {
+            try {
+                const sab = new SharedArrayBuffer(1024);
+                const view = new Int32Array(sab);
+                view[0] = 42;
+                const value = Atomics.load(view, 0);
+                
+                if (value === 42) {
+                    setStatus('sab-status', 'SharedArrayBuffer working', 'pass');
+                    log('SharedArrayBuffer test: PASS');
+                } else {
+                    throw new Error('Atomic operation failed');
+                }
+            } catch (error) {
+                setStatus('sab-status', `SharedArrayBuffer failed: ${error.message}`, 'fail');
+                log(`SharedArrayBuffer test: FAIL - ${error.message}`, 'error');
+            }
+        };
+        
+        // Test AudioWorklet
+        const testAudioWorklet = async () => {
+            try {
+                const ctx = new AudioContext();
+                await ctx.audioWorklet.addModule('/src/host/browser/worklets/nes-audio-processor.ts');
+                
+                const worklet = new AudioWorkletNode(ctx, 'nes-audio-processor', {
+                    numberOfInputs: 0,
+                    numberOfOutputs: 1,
+                    outputChannelCount: [2]
+                });
+                
+                setStatus('worklet-status', 'AudioWorklet working', 'pass');
+                log('AudioWorklet test: PASS');
+            } catch (error) {
+                setStatus('worklet-status', `AudioWorklet failed: ${error.message}`, 'fail');
+                log(`AudioWorklet test: FAIL - ${error.message}`, 'error');
+            }
+        };
+        
+        // Test Ring Buffer
+        const testRingBuffer = () => {
+            try {
+                // Import the ring buffer module
+                import('/src/host/browser/audio/shared-ring-buffer.ts').then(module => {
+                    const { createAudioSAB, getWriter } = module;
+                    
+                    const sab = createAudioSAB({ capacityFrames: 1024, channels: 2 });
+                    const writer = getWriter(sab);
+                    
+                    // Test basic operations
+                    const testData = new Float32Array([0.1, 0.2, 0.3, 0.4]);
+                    const written = writer.write(testData);
+                    
+                    if (written === 2) { // 2 frames for 2 channels
+                        setStatus('ring-buffer-status', 'Ring buffer working', 'pass');
+                        log('Ring buffer test: PASS');
+                    } else {
+                        throw new Error(`Expected 2 frames written, got ${written}`);
+                    }
+                }).catch(error => {
+                    setStatus('ring-buffer-status', `Ring buffer failed: ${error.message}`, 'fail');
+                    log(`Ring buffer test: FAIL - ${error.message}`, 'error');
+                });
+            } catch (error) {
+                setStatus('ring-buffer-status', `Ring buffer failed: ${error.message}`, 'fail');
+                log(`Ring buffer test: FAIL - ${error.message}`, 'error');
+            }
+        };
+        
+        // Event listeners
+        document.getElementById('test-audio-context').addEventListener('click', testAudioContext);
+        document.getElementById('test-sab').addEventListener('click', testSharedArrayBuffer);
+        document.getElementById('test-worklet').addEventListener('click', testAudioWorklet);
+        document.getElementById('test-ring-buffer').addEventListener('click', testRingBuffer);
+        document.getElementById('clear-log').addEventListener('click', () => {
+            document.getElementById('log').innerHTML = '';
+        });
+        
+        // Run compatibility test on load
+        testCompatibility();
+    </script>
+</body>
+</html>

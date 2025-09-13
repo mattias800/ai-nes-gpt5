@@ -8,7 +8,7 @@ import { getWriter, type SabBundle } from '../audio/shared-ring-buffer'
 
 const CPU_HZ = 1789773
 
-interface InitMsg { type: 'init'; sab?: SabBundle | null; sampleRate: number; channels: number; targetFillFrames: number; noAudio?: boolean }
+interface InitMsg { type: 'init'; sab?: SabBundle | null; sampleRate: number; channels: number; targetFillFrames: number; noAudio?: boolean; useLegacy?: boolean }
 interface LoadRomMsg { type: 'load_rom'; rom: Uint8Array; useVT: boolean; strict: boolean; apuRegion?: 'NTSC'|'PAL'; apuTiming?: 'integer'|'fractional'; apuSynth?: 'raw'|'blep' }
 interface StartMsg { type: 'start' }
 interface PauseMsg { type: 'pause' }
@@ -18,6 +18,7 @@ type Msg = InitMsg | LoadRomMsg | StartMsg | PauseMsg | InputMsg
 
 let sys: NESSystem | null = null
 let writer = null as ReturnType<typeof getWriter> | null
+let legacyChunk: Float32Array | null = null
 let sampleRate = 48000
 let channels = 2
 let run = false
@@ -26,6 +27,49 @@ let audioTimer: number | null = null
 let videoTimer: number | null = null
 let targetFillFrames = 4096
 let noAudio = false
+let useLegacy = false
+
+// Monitor whether audio ring is draining; if not, notify main to fallback
+let drainMonitor: number | null = null
+let lastOccSeen = 0
+let lastOccDecreaseTs = 0
+let startupPhase = true
+const startDrainMonitor = (): void => {
+  if (!writer || noAudio || drainMonitor != null) return
+  lastOccSeen = (writer as unknown as { occupancy: () => number }).occupancy()
+  lastOccDecreaseTs = (typeof performance !== 'undefined') ? performance.now() : 0
+  startupPhase = true
+  drainMonitor = (setInterval(() => {
+    if (!writer || noAudio) { if (drainMonitor != null) { clearInterval(drainMonitor as unknown as number); drainMonitor = null } return }
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0
+    const occ = (writer as unknown as { occupancy: () => number }).occupancy()
+    
+    // During startup (first 3 seconds), be more lenient
+    if (startupPhase && (now - lastOccDecreaseTs) > 3000) {
+      startupPhase = false
+    }
+    
+    if (occ < lastOccSeen) {
+      lastOccDecreaseTs = now
+      lastOccSeen = occ
+    } else {
+      lastOccSeen = occ
+    }
+    
+    // Only check for stall after startup phase and if occupancy is high
+    const stallThreshold = startupPhase ? 5000 : 2000
+    const highOccupancy = occ > (targetFillFrames * 0.8)
+    
+    if (!startupPhase && highOccupancy && (now - lastOccDecreaseTs) > stallThreshold) {
+      ;(postMessage as (msg: unknown) => void)({ type: 'audio-stall' })
+      clearInterval(drainMonitor as unknown as number)
+      drainMonitor = null
+    }
+  }, 250) as unknown as number)
+}
+const stopDrainMonitor = (): void => {
+  if (drainMonitor != null) { clearInterval(drainMonitor as unknown as number); drainMonitor = null }
+}
 
 // Simple DC-block filter state for audio (applied in worker before writing to SAB)
 let dcPrevIn = 0
@@ -37,7 +81,7 @@ const state = { lastCycles: 0, targetCycles: 0 }
 let scratch: Float32Array | null = null
 
 // Telemetry (worker-side)
-let pumpCount = 0
+let telemetryPumpCount = 0
 const pumpMsWindow: number[] = []
 let framesPerPumpAvg = 0
 let occMin = Number.POSITIVE_INFINITY
@@ -51,12 +95,14 @@ const occupancy = (): number => {
   return writer.occupancy()
 }
 
-const audioQuantum = 128
+const audioQuantum = 32
 const maxChunkFrames = 1024
 
 const generateInto = (frames: number, buf: Float32Array): number => {
   if (!sys) return 0
-  const cyclesPerSample = CPU_HZ / sampleRate
+  // Clamp sampleRate to sane range to avoid division by zero or NaN
+  const sr = (sampleRate && isFinite(sampleRate) && sampleRate > 0) ? sampleRate : 44100
+  const cyclesPerSample = CPU_HZ / sr
   let i = 0
   while (i < frames) {
     state.targetCycles += cyclesPerSample
@@ -86,11 +132,11 @@ const generateInto = (frames: number, buf: Float32Array): number => {
 }
 
 const postStatsIfDue = (toProduce: number, occNow: number, t0: number, t1: number, extra?: { occProd?: number; r?: number; w?: number }): void => {
-  pumpCount++
+  telemetryPumpCount++
   const dt = Math.max(0, t1 - t0)
   pumpMsWindow.push(dt)
   if (pumpMsWindow.length > 240) pumpMsWindow.shift()
-  framesPerPumpAvg = ((framesPerPumpAvg * (pumpCount - 1)) + toProduce) / pumpCount
+  framesPerPumpAvg = ((framesPerPumpAvg * (telemetryPumpCount - 1)) + toProduce) / telemetryPumpCount
   occMin = Math.min(occMin, occNow)
   occMax = Math.max(occMax, occNow)
   occSum += occNow
@@ -105,7 +151,7 @@ const postStatsIfDue = (toProduce: number, occNow: number, t0: number, t1: numbe
     ;(postMessage as (msg: unknown) => void)({
       type: 'worker-stats',
       audio: {
-        pumps: pumpCount,
+        pumps: telemetryPumpCount,
         pumpMsAvg,
         pumpMs95p,
         framesPerPumpAvg,
@@ -126,41 +172,106 @@ const postStatsIfDue = (toProduce: number, occNow: number, t0: number, t1: numbe
   }
 }
 
+let pumpCount = 0
 const pumpAudio = (): void => {
-  if (!run || !writer || !sys) return
-  // Use consumer-published occupancy if available
-  const occConsumer = (writer as any).consumerOccupancy ? (writer as unknown as { consumerOccupancy: () => number }).consumerOccupancy() : occupancy()
-  const occ = occConsumer
-  const free = writer.freeSpace()
-  // Aggressive burst pumping until near target
-  if (free < audioQuantum) return
+  if (!run || !sys) return
+  if (useLegacy) {
+    // Generate a small chunk and post to main
+    const frames = 512
+    const ch = Math.max(1, channels|0)
+    if (!legacyChunk || legacyChunk.length < (frames * ch)) legacyChunk = new Float32Array(frames * ch)
+    generateInto(frames, legacyChunk)
+    ;(postMessage as (m: unknown, t?: Transferable[]) => void)({ type: 'audio-chunk', samples: legacyChunk }, [legacyChunk.buffer])
+    return
+  }
+  if (!writer) return
+  
+  pumpCount++
+  if (pumpCount % 1000 === 0) {
+    console.log('[worker] pumpAudio called', pumpCount, 'times, writer exists:', !!writer)
+  }
+  
+  // Initialize audio state if needed
+  if (state.lastCycles === 0) { 
+    state.lastCycles = sys.cpu.state.cycles; 
+    state.targetCycles = state.lastCycles 
+    console.log('[worker] audio state initialized, cycles:', state.lastCycles)
+  }
+  
+  // Calculate occupancy using writer.debugRW() but ensure consistent timing
+  let r, w, occNow, freeNow
+  try {
+    const debug = writer.debugRW()
+    r = debug.r
+    w = debug.w
+    const capacity = 16384
+    occNow = ((w - r + capacity) % capacity) | 0
+    freeNow = writer.freeSpace()
+  } catch (e) {
+    console.error('[worker] debugRW failed:', e)
+    return
+  }
+  
+  // Debug: log free space occasionally
+  if (pumpCount % 500 === 0) {
+    console.log('[worker] freeSpace:', freeNow, 'audioQuantum:', audioQuantum, 'occNow:', occNow, 'targetFillFrames:', targetFillFrames, 'r:', r, 'w:', w)
+    // Also log the writer.occupancy() to compare
+    const writerOcc = writer.occupancy()
+    console.log('[worker] writer.occupancy():', writerOcc, 'manual calc:', occNow)
+  }
+  
+  // Only produce if we have reasonable free space
+  if (freeNow < audioQuantum) {
+    if (pumpCount % 1000 === 0) {
+      console.log('[worker] skipping pump - insufficient free space:', freeNow, 'need:', audioQuantum)
+    }
+    return
+  }
+  
   if (!scratch) scratch = new Float32Array(maxChunkFrames * channels)
-  if (state.lastCycles === 0) { state.lastCycles = sys.cpu.state.cycles; state.targetCycles = state.lastCycles }
+  
   const t0 = (typeof performance !== 'undefined') ? performance.now() : 0
   let bursts = 0
-  let occNow = occ
-  let freeNow = free
   let producedTotal = 0
-  while (occNow < (targetFillFrames - audioQuantum) && freeNow >= audioQuantum && bursts < 8) {
+  
+  // Produce audio in smaller, more frequent bursts for stability
+  while (occNow < (targetFillFrames - audioQuantum) && freeNow >= audioQuantum && bursts < 5) {
     const desired = Math.min(freeNow, Math.max(0, targetFillFrames - occNow))
-    const toProduce = Math.max(audioQuantum, Math.min(maxChunkFrames, desired))
+    const toProduce = Math.max(audioQuantum, Math.min(128, desired)) // Even smaller burst size
     const buf = scratch.subarray(0, toProduce * channels)
     generateInto(toProduce, buf)
-    writer.write(buf)
+    
+    // Debug: log before write
+    if (pumpCount % 500 === 0) {
+      console.log('[worker] about to write, toProduce:', toProduce, 'freeNow:', freeNow, 'occNow:', occNow)
+    }
+    
+    const written = writer.write(buf)
+    if (written === 0) {
+      console.warn('[worker] failed to write audio data, freeSpace:', freeNow, 'toProduce:', toProduce)
+      break
+    } else if (pumpCount % 1000 === 0) {
+      console.log('[worker] wrote', written, 'frames, toProduce:', toProduce, 'occNow:', occNow)
+    }
     producedTotal += toProduce
-    occNow = (writer as any).consumerOccupancy ? (writer as any).consumerOccupancy() : writer.occupancy()
+    occNow = writer.occupancy()
     freeNow = writer.freeSpace()
     bursts++
+    
+    // Debug: log every 100th write to see if data is being written
+    if (producedTotal % 1000 === 0) {
+      console.log('[worker] wrote', producedTotal, 'frames, occ:', occNow, 'free:', freeNow)
+    }
   }
   const t1 = (typeof performance !== 'undefined') ? performance.now() : 0
 
   // Telemetry (include producer view and R/W)
-  const prodOcc = writer.occupancy()
-  const { r, w } = (writer as unknown as { debugRW: () => { r: number; w: number } }).debugRW()
-  postStatsIfDue(producedTotal, occ, t0, t1, { occProd: prodOcc, r, w })
+  const prodOcc = occNow // Use the same occupancy calculation
+  const { r: rTelemetry, w: wTelemetry } = (writer as unknown as { debugRW: () => { r: number; w: number } }).debugRW()
+  postStatsIfDue(producedTotal, occNow, t0, t1, { occProd: prodOcc, r: rTelemetry, w: wTelemetry })
 
   // If far below target (underrun risk), schedule a micro backfill
-  if (writer.occupancy() < (targetFillFrames >> 1) && free > 0) {
+  if (occNow < (targetFillFrames >> 1) && freeNow > 0) {
     setTimeout(pumpAudio, 0)
   }
 }
@@ -175,7 +286,8 @@ const stepOneFrame = (): void => {
 
 const sendVideoFrame = (): void => {
   if (!sys) return
-  if (!writer) stepOneFrame()
+  // Always advance video frame regardless of audio state to prevent grey screen
+  stepOneFrame()
   const fb = (sys.ppu as unknown as { getFrameBuffer: () => Uint8Array }).getFrameBuffer()
   // Transfer palette indices buffer to main; main will colorize
   const buf = new Uint8Array(fb)
@@ -183,7 +295,8 @@ const sendVideoFrame = (): void => {
 }
 
 const startLoops = (): void => {
-  if (audioTimer == null) audioTimer = (setInterval(pumpAudio, 1) as unknown as number)
+  // Use moderate audio pump interval for stability
+  if (audioTimer == null) audioTimer = (setInterval(pumpAudio, 3) as unknown as number)
   if (videoTimer == null) videoTimer = (setInterval(sendVideoFrame, 1000 / 60) as unknown as number)
 }
 
@@ -195,14 +308,24 @@ const stopLoops = (): void => {
 const handleMessage = (e: MessageEvent<Msg>): void => {
   const msg = e.data
   switch (msg.type) {
-case 'init': {
+    case 'init': {
       noAudio = !!msg.noAudio
+      useLegacy = !!msg.useLegacy
       writer = msg.sab ? getWriter(msg.sab) : null
       sampleRate = msg.sampleRate|0
       channels = msg.channels|0
       targetFillFrames = msg.targetFillFrames|0
       // Allocate scratch based on channels
       scratch = new Float32Array(maxChunkFrames * channels)
+      
+      console.log('[worker] init: noAudio:', noAudio, 'useLegacy:', useLegacy, 'writer:', !!writer, 'sampleRate:', sampleRate, 'channels:', channels, 'targetFillFrames:', targetFillFrames)
+      if (writer) {
+        const { r, w } = writer.debugRW()
+        console.log('[worker] initial SAB state: r:', r, 'w:', w, 'occ:', writer.occupancy(), 'free:', writer.freeSpace())
+      }
+      
+      // Temporarily disable drain monitor to debug stall issue
+      // if (writer && !noAudio && !useLegacy) startDrainMonitor()
       break
     }
     case 'load_rom': {
@@ -230,12 +353,12 @@ case 'init': {
 case 'start': {
       run = true
       // Synchronous prefill to reduce initial underruns
-      if (writer && sys) {
+      if (!useLegacy && writer && sys) {
         if (!scratch) scratch = new Float32Array(maxChunkFrames * channels)
         // Fill up to targetFillFrames (bounded bursts to avoid blocking too long)
         let guard = 0
         while (writer.occupancy() < (targetFillFrames - audioQuantum) && writer.freeSpace() >= audioQuantum && guard < 64) {
-          const occNow = writer.occupancy()
+          let occNow = writer.occupancy()
           const toProduce = Math.min(maxChunkFrames, Math.max(audioQuantum, targetFillFrames - occNow))
           const buf = scratch.subarray(0, toProduce * channels)
           generateInto(toProduce, buf)
@@ -244,11 +367,14 @@ case 'start': {
         }
       }
       startLoops()
+      // Temporarily disable drain monitor to debug stall issue
+      // if (!useLegacy && writer && !noAudio) startDrainMonitor()
       break
     }
     case 'pause': {
       run = false
       stopLoops()
+      stopDrainMonitor()
       break
     }
     case 'input': {

@@ -31,13 +31,19 @@ export class NESSystem {
     if (mapper.setTimeProvider) mapper.setTimeProvider(() => ({ frame: this.ppu.frame, scanline: this.ppu.scanline, cycle: this.ppu.cycle }));
     if (mapper.setCtrlProvider) mapper.setCtrlProvider(() => {
       // Provide an 'effective' ctrl from the start-of-line snapshot (ctrlLine), which matches phase selection.
+      // Preserve bits:
+      //  - 0x08: sprite pattern table ($1000)
+      //  - 0x10: background pattern table ($1000)
+      //  - 0x20: sprite height 8x16 (needed to treat sprite-phase as using $1000 implicitly)
       const ctrl = ((this.ppu as any).getCtrlLine ? (this.ppu as any).getCtrlLine() : this.ppu.ctrl) & 0xFF;
       const mask = this.ppu.mask & 0xFF;
       const spUses1000 = (ctrl & 0x08) !== 0;
       const bgUses1000 = (ctrl & 0x10) !== 0;
+      const spHeight16 = (ctrl & 0x20) !== 0;
       const spOn = (mask & 0x10) !== 0;
       const bgOn = (mask & 0x08) !== 0;
-      let eff = ctrl & 0x18;
+      // Keep 0x08/0x10/0x20 as-is, then optionally bias bg to $1000 if neither plane selects $1000 but bg is enabled alone.
+      let eff = ctrl & 0x38; // 0x08|0x10|0x20
       if (!bgUses1000 && !spUses1000) {
         if (bgOn && !spOn) eff |= 0x10;
       }

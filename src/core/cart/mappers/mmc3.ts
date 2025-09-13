@@ -185,45 +185,16 @@ export class MMC3 implements Mapper {
     const hadReloadReq = this.reloadPending === true;
 
     const ctrBefore = this.irqCounter & 0xFF;
-    // Prefer decrement at the first sprite-phase on scanline 0 when sprites use $1000,
-    // to ensure the expected earlier IRQ in timing-only tests (when latch was prepared earlier).
-    const isS0 = !!(t && t.scanline === 0);
-    const cyc = t ? (t.cycle | 0) : -1;
-    const spritePhase = (cyc >= 256 && cyc <= 266);
-    const bgPhase = (cyc >= 320 && cyc <= 330);
-    let spUses1000 = false, bgUses1000 = false;
-    if (this.ctrlProvider) {
-      try {
-        const ctrl = this.ctrlProvider() & 0xFF;
-        spUses1000 = ((ctrl & 0x08) !== 0) || ((ctrl & 0x20) !== 0);
-        bgUses1000 = ((ctrl & 0x10) !== 0);
-      } catch {}
-    }
 
     if (this.reloadPending) {
-      // Special-case: at s0 sprite-phase with sprites@$1000 and a valid running counter, prefer decrement
-      if (isS0 && spritePhase && spUses1000 && this.irqCounter > 0) {
-        this.irqCounter = (this.irqCounter - 1) & 0xFF;
-        op = 'dec';
-        this.reloadPending = false; // consume the pending reload; bg-phase will then take a normal path
-      } else {
-        this.irqCounter = this.irqLatch & 0xFF;
-        this.reloadPending = false;
-        op = (this.irqCounter === 0) ? 'rel0' : 'rel';
-      }
+      this.irqCounter = this.irqLatch & 0xFF;
+      this.reloadPending = false;
+      op = (this.irqCounter === 0) ? 'rel0' : 'rel';
     } else if (this.irqCounter === 0) {
-      // If we are at s0 sprite-phase and sprites@$1000, avoid immediate reload so bg-phase can see a dec->0 earlier?
-      // No, canonical behavior reloads when counter==0; keep it, but s0 sprite-phase prefers dec path above.
       this.irqCounter = this.irqLatch & 0xFF;
       op = (this.irqCounter === 0) ? 'rel0' : 'rel';
     } else {
       this.irqCounter = (this.irqCounter - 1) & 0xFF;
-      op = 'dec';
-    }
-    // Heuristic: if we unexpectedly reloaded when counter was 1 (should have decremented to 0),
-    // treat as a dec-to-zero event to align with edge-driven CPU-triggered pulses tests.
-    if (!hadReloadReq && ctrBefore === 1 && op === 'rel') {
-      this.irqCounter = 0;
       op = 'dec';
     }
     if (this.traceEnabled) {
@@ -241,14 +212,17 @@ export class MMC3 implements Mapper {
     if (!onPreRender) {
       const decToZero = (op === 'dec' && this.irqCounter === 0);
       const relToZero = (op === 'rel0');
+      if (decToZero) this.addTrace({ type: 'DEC0', en: this.irqEnabled });
       if (this.irqEnabled && (decToZero || (this.assertOnRel0 && relToZero))) {
         this.irq = true;
         this.addTrace({ type: 'IRQ' });
         if (this.traceEnabled) {
           try { /* eslint-disable no-console */ console.log(`[mmc3] IRQ assert${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`); /* eslint-enable no-console */ } catch {}
         }
+      } else if (decToZero && !this.irqEnabled) {
+        this.addTrace({ type: 'DEC0MISS' });
+      }
     }
-
 
     // Trace A12 with extra details
     const entry: any = { type: 'A12', ctr: this.irqCounter, en: this.irqEnabled };
@@ -272,7 +246,7 @@ export class MMC3 implements Mapper {
   setTimeProvider(fn: (/* no args */) => { frame: number, scanline: number, cycle: number }): void {
     this.timeProvider = fn;
   }
-  setCtrlProvider?(fn: () => number): void { this.ctrlProvider = fn; }
+  setCtrlProvider(fn: () => number): void { this.ctrlProvider = fn; }
 
   getBatteryRam(): Uint8Array | null {
     const size = this.prgRam.length - this.prgBatteryOffset;

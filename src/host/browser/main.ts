@@ -31,9 +31,16 @@ let gainNode: GainNode | null = null
 let worker: Worker | null = null
 let romBytes: Uint8Array | null = null
 let flags: { useVT: boolean; strict: boolean } = { useVT: true, strict: false }
+let legacyNode: AudioWorkletNode | null = null
+let audioWorkletLoaded = false
+// Diagnostics: track inbound frames from worker and last frame timestamp
+let framesReceived = 0
+let lastFrameTs = 0
+let lastWorkletStatsTs = 0
 
 const query = new URL(window.location.href).searchParams
 const statsEnabled = query.get('stats') === '1'
+const forceNoAudio = query.get('noaudio') === '1'
 
 // Stats overlay
 interface StatsOverlay { root: HTMLElement; set: (k: string, v: string) => void }
@@ -62,35 +69,99 @@ const onStats = (data: any): void => {
     stats.set('occ now (cons/prod)', `${Math.round(a.occConsumerNow ?? -1)}/${Math.round(a.occProducerNow ?? -1)}`)
     stats.set('rw (r/w)', `${Math.round(a.r ?? -1)}/${Math.round(a.w ?? -1)}`)
   } else if (data?.type === 'worklet-stats') {
+    lastWorkletStatsTs = performance.now()
     stats.set('Underruns', String((data.underruns ?? 0)|0))
     stats.set('Worklet occ min/avg/max', `${Math.round(data.occMin ?? 0)}/${Math.round(data.occAvg ?? 0)}/${Math.round(data.occMax ?? 0)}`)
     stats.set('sampleRate', String((data.sampleRate ?? 0)|0))
+    if (typeof data.r === 'number' && typeof data.w === 'number') {
+      stats.set('worklet rw (r/w)', `${data.r}|${data.w}`)
+    }
+    if (typeof data.capacity === 'number') stats.set('worklet cap', String(data.capacity))
+    if (typeof data.ringChannels === 'number') stats.set('worklet ch', String(data.ringChannels))
   }
 }
 
 // Audio setup
 const setupAudio = async (): Promise<void> => {
-  if (audioCtx) return
-  audioCtx = new AudioContext()
-  await audioCtx.audioWorklet.addModule(new URL('./worklets/nes-audio-processor.ts', import.meta.url))
+  if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 44100 })
+  if (!audioWorkletLoaded) {
+    await audioCtx.audioWorklet.addModule(new URL('./worklets/nes-audio-processor.ts', import.meta.url))
+    audioWorkletLoaded = true
+  }
 }
 
 const startAudioGraph = (): { sab: ReturnType<typeof createAudioSAB> } => {
   const ctxA = audioCtx!
   const channels = 2
   const sab = createAudioSAB({ capacityFrames: 16384, channels })
+  
+  // Create worklet without SAB in constructor to avoid timing issues
   workletNode = new AudioWorkletNode(ctxA, 'nes-audio-processor', {
     numberOfInputs: 0,
     numberOfOutputs: 1,
     outputChannelCount: [channels],
-    processorOptions: { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB },
-  })
-  workletNode.port.onmessage = (ev: MessageEvent) => onStats(ev.data)
-  if (statsEnabled) workletNode.port.postMessage({ type: 'enable-stats', value: true })
+    channelCount: channels,
+    channelCountMode: 'explicit',
+    channelInterpretation: 'speakers',
+  } as any)
+  
+  workletNode.port.onmessage = (ev: MessageEvent) => {
+    const d = ev.data
+    if (d?.type === 'worklet-ready') {
+      console.log('[audio] worklet-ready, sending SAB')
+      // Send SAB binding after readiness
+      try {
+        workletNode!.port.postMessage({ type: 'set-sab', controlSAB: sab.controlSAB, dataSAB: sab.dataSAB })
+      } catch (e) {
+        console.warn('[audio] failed to post set-sab:', e)
+      }
+    } else if (d?.type === 'worklet-ack') {
+      console.log('[audio] worklet-ack:', d.what)
+      onStats(d)
+    } else if (d?.type === 'worklet-stats') {
+      onStats(d)
+    } else if (d?.type === 'worklet-error') {
+      console.warn('[audio] worklet error:', d?.message)
+    }
+  }
+  
+  // Enable stats and connect audio graph
+  workletNode.port.postMessage({ type: 'enable-stats', value: true })
   gainNode = new GainNode(ctxA, { gain: 0.25 })
   workletNode.connect(gainNode)
   gainNode.connect(ctxA.destination)
+  
+  // Ensure context is running after connecting
+  try { 
+    void ctxA.resume() 
+    console.log('[audio] context resumed, state:', ctxA.state)
+    
+    // Check if worklet is properly connected
+    setTimeout(() => {
+      console.log('[audio] context state after 1s:', ctxA.state)
+      console.log('[audio] worklet connected:', workletNode?.context === ctxA)
+      console.log('[audio] gain connected:', gainNode?.context === ctxA)
+    }, 1000)
+  } catch (e) {
+    console.warn('[audio] context resume failed:', e)
+  }
+  
   return { sab }
+}
+
+// Legacy audio path using message-queued chunks into a simpler worklet
+const startLegacyAudioGraph = async (): Promise<void> => {
+  if (!audioCtx) audioCtx = new AudioContext()
+  await audioCtx.audioWorklet.addModule(new URL('./nes-worklet.js', import.meta.url))
+  // Create processor that expects {type:'samples', data: Float32Array}
+  legacyNode = new AudioWorkletNode(audioCtx, 'nes-processor', {
+    numberOfInputs: 0,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+  })
+  // Connect directly; volume can be adjusted on node if needed
+  legacyNode.connect(audioCtx.destination)
+  try { await audioCtx.resume() } catch {}
 }
 
 // RAF-driven presenter with coalescing
@@ -143,6 +214,7 @@ const presentLoop = (_ts: number): void => {
       stats.set('frames drawn', String(framesDrawn))
       stats.set('frames dropped', String(framesDropped))
       stats.set('draw ms (EMA)', drawCostEMA.toFixed(2))
+      stats.set('frames recv', String(framesReceived))
       fpsCounter = 0
       lastFpsTs = now
     }
@@ -201,16 +273,15 @@ startBtn.addEventListener('click', async (): Promise<void> => {
   let sab: ReturnType<typeof createAudioSAB> | null = null
   let sampleRate = 48000
   const channels = 2
-  if (sabAvailable) {
+  const wantAudio = sabAvailable && !forceNoAudio
+  if (wantAudio) {
     try {
+      // Explicitly match device sampleRate to avoid resample mismatch; load worklet before creating node
       await setupAudio()
+      const g = startAudioGraph()
+      sab = g.sab
+      sampleRate = audioCtx!.sampleRate
       await audioCtx!.resume()
-      const started = audioCtx!.state === 'running'
-      if (started) {
-        const g = startAudioGraph()
-        sab = g.sab
-        sampleRate = audioCtx!.sampleRate
-      }
     } catch (e) {
       console.warn('Audio setup failed, falling back to no-audio mode:', e)
       sab = null
@@ -225,21 +296,76 @@ startBtn.addEventListener('click', async (): Promise<void> => {
       if (newFrameAvailable) framesDropped++
       latestFrame = d.indices as Uint8Array
       newFrameAvailable = true
+      framesReceived++
+      lastFrameTs = performance.now()
       // Draw immediately as a fallback to ensure visible output even if RAF is delayed
       drawLatest()
       newFrameAvailable = false
     } else if (d.type === 'worker-stats') {
       onStats(d)
+    } else if (d.type === 'audio-stall') {
+      console.warn('[audio] worker reported stall; switching to legacy audio fallback')
+      void fallbackToLegacyAudio('worker-reported stall')
+    } else if (d.type === 'audio-chunk' && legacyNode) {
+      const arr = new Float32Array(d.samples)
+      legacyNode.port.postMessage({ type: 'samples', data: arr }, [arr.buffer])
     }
   }
   worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB } : null, sampleRate, channels, targetFillFrames: 4096, noAudio: !sab })
-  // Load ROM and start
-  worker.postMessage({ type: 'load_rom', rom: romBytes, useVT: flags.useVT, strict: flags.strict, apuRegion: (window as any).__apuRegion, apuTiming: (window as any).__apuTiming, apuSynth: (window as any).__apuSynth }, [romBytes.buffer])
+  worker.onerror = (ev: ErrorEvent): void => { console.error('[worker] error', ev.message, ev.error) }
+  worker.onmessageerror = (ev: MessageEvent): void => { console.error('[worker] messageerror', ev.data) }
+  // Load ROM and start (send a copy so we retain our local ROM for possible fallback)
+  {
+    const romCopy = new Uint8Array(romBytes)
+    worker.postMessage({ type: 'load_rom', rom: romCopy, useVT: flags.useVT, strict: flags.strict, apuRegion: (window as any).__apuRegion, apuTiming: (window as any).__apuTiming, apuSynth: (window as any).__apuSynth }, [romCopy.buffer])
+  }
   worker.postMessage({ type: 'start' })
   running = true
   startBtn.disabled = true
   pauseBtn.disabled = false
   statusEl.textContent = sab ? 'Running' : 'Running (no audio)'
+    // If no frames arrive shortly after start, surface a helpful status to aid debugging.
+    const startCheckTs = performance.now()
+    setTimeout((): void => {
+      if (framesReceived === 0 && running && performance.now() - startCheckTs >= 1900) {
+        statusEl.textContent = 'No video frames received yet. Open with ?stats=1 and check console for worker errors.'
+      }
+      // If audio was desired but no worklet stats have arrived and frames are stalled, fall back to video-only
+      if ((sabAvailable && !forceNoAudio) && (lastWorkletStatsTs < startCheckTs) && framesReceived <= 1 && running) {
+        console.warn('[audio] suspected stall at startup; switching to legacy audio fallback')
+        void fallbackToLegacyAudio('startup stall')
+      }
+    }, 1800)
+    
+    // Additional check for video-only mode if audio completely fails
+    setTimeout((): void => {
+      if (framesReceived === 0 && running && performance.now() - startCheckTs >= 3000) {
+        console.warn('[video] No frames received after 3s, attempting video-only restart')
+        statusEl.textContent = 'Restarting in video-only mode...'
+        // Force restart without audio
+        worker?.terminate()
+        worker = new Worker(new URL('./workers/nesCore.worker.ts', import.meta.url), { type: 'module' })
+        worker.onmessage = (e: MessageEvent): void => {
+          const d = e.data || {}
+          if (d.type === 'ppu-frame') {
+            if (newFrameAvailable) framesDropped++
+            latestFrame = d.indices as Uint8Array
+            newFrameAvailable = true
+            framesReceived++
+            lastFrameTs = performance.now()
+            drawLatest()
+            newFrameAvailable = false
+          }
+        }
+        worker.postMessage({ type: 'init', sab: null, sampleRate: 48000, channels: 1, targetFillFrames: 2048, noAudio: true })
+        if (romBytes) {
+          const romCopy = new Uint8Array(romBytes)
+          worker.postMessage({ type: 'load_rom', rom: romCopy, useVT: flags.useVT, strict: flags.strict, apuRegion: (window as any).__apuRegion, apuTiming: (window as any).__apuTiming, apuSynth: (window as any).__apuSynth }, [romCopy.buffer])
+        }
+        worker.postMessage({ type: 'start' })
+        statusEl.textContent = 'Running (video-only fallback)'
+      }
+    }, 3000)
 })
 
 pauseBtn.addEventListener('click', (): void => {
@@ -249,4 +375,48 @@ pauseBtn.addEventListener('click', (): void => {
   statusEl.textContent = 'Paused'
   worker?.postMessage({ type: 'pause' })
 })
+
+// Fallback: respawn in legacy audio mode if SAB-drain fails
+const fallbackToLegacyAudio = async (reason: string): Promise<void> => {
+  // Tear down SAB path
+  try { workletNode?.disconnect() } catch {}
+  try { gainNode?.disconnect() } catch {}
+  workletNode = null
+  gainNode = null
+  // Keep AudioContext open for legacy path (creates its own worklet)
+  // Respawn worker and switch to legacy audio mode
+  const old = worker
+  try { old?.terminate() } catch {}
+  await startLegacyAudioGraph()
+  worker = new Worker(new URL('./workers/nesCore.worker.ts', import.meta.url), { type: 'module' })
+  worker.onmessage = (e: MessageEvent): void => {
+    const d = e.data || {}
+    if (d.type === 'ppu-frame') {
+      if (newFrameAvailable) framesDropped++
+      latestFrame = d.indices as Uint8Array
+      newFrameAvailable = true
+      framesReceived++
+      lastFrameTs = performance.now()
+      drawLatest()
+      newFrameAvailable = false
+    } else if (d.type === 'worker-stats') {
+      onStats(d)
+    } else if (d.type === 'audio-chunk' && legacyNode) {
+      // Forward audio samples to legacy worklet
+      const arr = new Float32Array(d.samples)
+      legacyNode.port.postMessage({ type: 'samples', data: arr }, [arr.buffer])
+    }
+  }
+  worker.onerror = (ev: ErrorEvent): void => { console.error('[worker] error (legacy)', ev.message, ev.error) }
+  worker.onmessageerror = (ev: MessageEvent): void => { console.error('[worker] messageerror (legacy)', ev.data) }
+  const sampleRate = audioCtx?.sampleRate || 48000
+  const channels = 1 // legacy processor duplicates to output
+  worker.postMessage({ type: 'init', sab: null, sampleRate, channels, targetFillFrames: 2048, noAudio: false, useLegacy: true })
+  if (romBytes) {
+    const romCopy = new Uint8Array(romBytes)
+    worker.postMessage({ type: 'load_rom', rom: romCopy, useVT: flags.useVT, strict: flags.strict, apuRegion: (window as any).__apuRegion, apuTiming: (window as any).__apuTiming, apuSynth: (window as any).__apuSynth }, [romCopy.buffer])
+  }
+  worker.postMessage({ type: 'start' })
+  statusEl.textContent = `Running (legacy audio, fallback: ${reason})`
+}
 

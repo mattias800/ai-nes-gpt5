@@ -78,7 +78,12 @@ export const getWriter = (bundle: SabBundle): RingBufferWriter => {
     const r = Atomics.load(control, H.ReadIdx)|0
     const w = Atomics.load(control, H.WriteIdx)|0
     const occ = ((w - r + capacity) % capacity)|0
-    return (capacity - 1 - occ)|0
+    const free = (capacity - 1 - occ)|0
+    // Debug: log occasionally
+    if (Math.random() < 0.001) {
+      console.log('[ring-buffer] r:', r, 'w:', w, 'occ:', occ, 'free:', free, 'capacity:', capacity)
+    }
+    return free
   }
   const occupancy = (): number => ((Atomics.load(control, H.WriteIdx)|0 - (Atomics.load(control, H.ReadIdx)|0) + capacity) % capacity)|0
   const consumerOccupancy = (): number => Atomics.load(control, H.LastOccupancy)|0

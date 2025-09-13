@@ -341,9 +341,10 @@ export class PPU {
         const height16 = (ctrlSnap & 0x20) !== 0;
         const spUses1000 = ((ctrlSnap & 0x08) !== 0) || height16;
         const bgUses1000 = ((ctrlSnap & 0x10) !== 0);
-        const visibleLine = (this.scanline >= 0 && this.scanline <= 239);
-        const allowSpritePhase = renderingEnabled || this.scanline === 261 || (visibleLine && spUses1000) || this.uncondPulses;
-        const allowBgPhase = renderingEnabled || this.scanline === 261 || (visibleLine && bgUses1000) || this.uncondPulses;
+        // Only generate phase pulses on visible lines when rendering is enabled.
+        // Keep a prerender (261) pulse to preload MMC3, and allow explicit override via env.
+        const allowSpritePhase = (renderingEnabled && spUses1000) || this.scanline === 261 || this.uncondPulses;
+        const allowBgPhase = (renderingEnabled) || this.scanline === 261 || this.uncondPulses;
         // Sprite-phase pulse near dot ~260
         if (allowSpritePhase && this.cycle === 260) {
           const emit = (!this.linePulseDone && spUses1000);

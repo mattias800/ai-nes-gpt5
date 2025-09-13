@@ -34,6 +34,8 @@ const optStats = $('#opt-stats') as HTMLInputElement | null
 const optFastdraw = $('#opt-fastdraw') as HTMLInputElement | null
 const optLowlat = $('#opt-lowlat') as HTMLInputElement | null
 const optNoaudio = $('#opt-noaudio') as HTMLInputElement | null
+const volumeSlider = $('#volume') as HTMLInputElement | null
+const volumeLabel = $('#volumeLabel') as HTMLSpanElement | null
 
 // Initialize UI controls from URL defaults
 if (optStats) optStats.checked = defaultStatsEnabled
@@ -56,6 +58,7 @@ let running = false
 let audioCtx: AudioContext | null = null
 let workletNode: AudioWorkletNode | null = null
 let gainNode: GainNode | null = null
+let volumeLevel = 0.25
 let worker: Worker | null = null
 let romBytes: Uint8Array | null = null
 let flags: { useVT: boolean; strict: boolean } = { useVT: true, strict: false }
@@ -141,6 +144,22 @@ const onStats = (data: any): void => {
   }
 }
 
+// Volume helpers (UI -> master gain)
+const getSliderVolume = (): number => {
+  const raw = Number(volumeSlider?.value ?? '25')
+  if (!Number.isFinite(raw)) return 0.25
+  return Math.max(0, Math.min(1, raw / 100))
+}
+const applyVolume = (): void => {
+  volumeLevel = getSliderVolume()
+  try { if (gainNode) gainNode.gain.value = volumeLevel } catch {}
+  if (volumeLabel) volumeLabel.textContent = `${Math.round(volumeLevel * 100)}%`
+}
+if (volumeSlider) {
+  applyVolume()
+  volumeSlider.addEventListener('input', applyVolume)
+}
+
 // Audio setup
 const setupAudio = async (): Promise<void> => {
   if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 44100 })
@@ -190,7 +209,7 @@ const startAudioGraph = (): { sab: ReturnType<typeof createAudioSAB> } => {
   if (options.statsEnabled) {
     workletNode.port.postMessage({ type: 'enable-stats', value: true })
   }
-  gainNode = new GainNode(ctxA, { gain: 0.25 })
+  gainNode = new GainNode(ctxA, { gain: volumeLevel })
   workletNode.connect(gainNode)
   gainNode.connect(ctxA.destination)
   
@@ -222,8 +241,10 @@ const startLegacyAudioGraph = async (): Promise<void> => {
     numberOfOutputs: 1,
     outputChannelCount: [1],
   })
-  // Connect directly; volume can be adjusted on node if needed
-  legacyNode.connect(audioCtx.destination)
+  // Route through master gain for unified volume control
+  gainNode = new GainNode(audioCtx, { gain: volumeLevel })
+  legacyNode.connect(gainNode)
+  gainNode.connect(audioCtx.destination)
   try { await audioCtx.resume() } catch {}
 }
 

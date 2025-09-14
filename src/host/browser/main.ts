@@ -1,5 +1,7 @@
 import { NES_PALETTE } from './palette'
 import { createAudioSAB } from './audio/shared-ring-buffer'
+// Import the audio worklet URL at module top (TS + ?url) so it resolves in dev and build
+import nesAudioProcessorUrl from './worklets/nes-audio-processor.ts?url'
 
 // Query flags (read once; UI controls take precedence)
 const query = new URL(window.location.href).searchParams
@@ -11,6 +13,11 @@ const fillParam = (() => { const v = Number(query.get('fill')); return Number.is
 
 // Prefer SAB (COOP/COEP) for low-latency audio, but fall back to video-only when unavailable
 const sabAvailable = (typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated) && (typeof SharedArrayBuffer !== 'undefined')
+console.log('[main] SAB availability check:', {
+  crossOriginIsolated: typeof crossOriginIsolated !== 'undefined' ? crossOriginIsolated : 'undefined',
+  SharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined' ? 'available' : 'unavailable',
+  sabAvailable
+})
 if (!sabAvailable) {
   const div = document.createElement('div')
   div.style.cssText = 'position:fixed;left:8px;bottom:8px;background:rgba(0,0,0,0.75);color:#fff;padding:10px 12px;border-radius:6px;max-width:520px;font:13px/1.4 system-ui;z-index:9999;'
@@ -52,7 +59,7 @@ let options = {
 let fastDraw: boolean = optFastdraw?.checked ?? defaultFastDraw
 
 // Create drawing context using current fastDraw
-let ctx = canvas.getContext('2d', { alpha: false, desynchronized: fastDraw } as any)!
+let ctx = canvas.getContext('2d', { alpha: false, desynchronized: fastDraw } as any) as CanvasRenderingContext2D
 
 let running = false
 let audioCtx: AudioContext | null = null
@@ -64,10 +71,8 @@ let romBytes: Uint8Array | null = null
 let flags: { useVT: boolean; strict: boolean } = { useVT: true, strict: false }
 let legacyNode: AudioWorkletNode | null = null
 let audioWorkletLoaded = false
-// Diagnostics: track inbound frames from worker and last frame timestamp
+// Diagnostics: track inbound frames from worker
 let framesReceived = 0
-let lastFrameTs = 0
-let lastWorkletStatsTs = 0
 
 // Helpers to manage session lifecycle
 const teardownAudioGraph = (): void => {
@@ -91,8 +96,6 @@ const resetPresentationState = (): void => {
   fpsCounter = 0
   drawCostEMA = 0
   lastFpsTs = performance.now()
-  lastWorkletStatsTs = 0
-  lastFrameTs = 0
 }
 
 
@@ -134,7 +137,6 @@ const onStats = (data: any): void => {
     stats.set('occ now (cons/prod)', `${Math.round(a.occConsumerNow ?? -1)}/${Math.round(a.occProducerNow ?? -1)}`)
     stats.set('rw (r/w)', `${Math.round(a.r ?? -1)}/${Math.round(a.w ?? -1)}`)
   } else if (data?.type === 'worklet-stats') {
-    lastWorkletStatsTs = performance.now()
     stats.set('Underruns', String((data.underruns ?? 0)|0))
     stats.set('Worklet occ min/avg/max', `${Math.round(data.occMin ?? 0)}/${Math.round(data.occAvg ?? 0)}/${Math.round(data.occMax ?? 0)}`)
     stats.set('sampleRate', String((data.sampleRate ?? 0)|0))
@@ -166,7 +168,7 @@ if (volumeSlider) {
 const setupAudio = async (): Promise<void> => {
   if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 44100 })
   if (!audioWorkletLoaded) {
-await audioCtx.audioWorklet.addModule(new URL('./worklets/nes-audio-processor.js', import.meta.url))
+    await audioCtx.audioWorklet.addModule(nesAudioProcessorUrl as unknown as string)
     audioWorkletLoaded = true
   }
 }
@@ -261,7 +263,7 @@ canvas.height = HEIGHT
 let rgbaImage = ctx.createImageData(WIDTH, HEIGHT)
 let rgbaU32 = new Uint32Array(rgbaImage.data.buffer)
 const recreateContext = (): void => {
-  ctx = canvas.getContext('2d', { alpha: false, desynchronized: fastDraw } as any)!
+  ctx = canvas.getContext('2d', { alpha: false, desynchronized: fastDraw } as any) as CanvasRenderingContext2D
   rgbaImage = ctx.createImageData(WIDTH, HEIGHT)
   rgbaU32 = new Uint32Array(rgbaImage.data.buffer)
 }
@@ -389,33 +391,41 @@ startBtn.addEventListener('click', async (): Promise<void> => {
   resetPresentationState()
   let sab: ReturnType<typeof createAudioSAB> | null = null
   let sampleRate = 48000
-  const channels = 2
   const wantAudio = sabAvailable && !options.forceNoAudio
   let usingLegacy = false
+  console.log('[main] Audio setup decision:', {
+    sabAvailable,
+    forceNoAudio: options.forceNoAudio,
+    wantAudio
+  })
   if (wantAudio) {
     try {
+      console.log('[main] Setting up SAB audio...')
       // Explicitly match device sampleRate to avoid resample mismatch; load worklet before creating node
       await setupAudio()
       const g = startAudioGraph()
       sab = g.sab
       sampleRate = audioCtx!.sampleRate
       await audioCtx!.resume()
+      console.log('[main] SAB audio setup successful, sampleRate:', sampleRate)
     } catch (e) {
       console.warn('Audio setup failed, falling back to no-audio mode:', e)
       sab = null
     }
   } else if (!options.forceNoAudio && !sabAvailable) {
+    console.log('[main] SAB unavailable, setting up legacy audio...')
     // SAB unavailable (e.g., GitHub Pages). Use legacy audio path instead of video-only.
     try {
       await startLegacyAudioGraph()
       sampleRate = audioCtx?.sampleRate || 48000
       usingLegacy = true
+      console.log('[main] Legacy audio setup successful, sampleRate:', sampleRate)
     } catch (e) {
       console.warn('Legacy audio setup failed, continuing without audio:', e)
       usingLegacy = false
     }
   }
-// Spawn worker and init (use Vite worker loader URL to avoid bundling deopts)
+// Spawn worker and init (use Vite worker loader for both dev and prod)
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
   // @ts-ignore - Vite will provide a string URL for the worker asset
   const nesWorkerUrl = (await import('./workers/nesCore.worker.ts?worker&url')).default as string
@@ -428,7 +438,6 @@ startBtn.addEventListener('click', async (): Promise<void> => {
       latestFrame = d.indices as Uint8Array
       newFrameAvailable = true
       framesReceived++
-      lastFrameTs = performance.now()
       // Fast-draw path: draw immediately to minimize latency (may tear)
       if (fastDraw) { drawLatest(); newFrameAvailable = false }
   } else if (d.type === 'worker-stats') {
@@ -484,47 +493,4 @@ pauseBtn.addEventListener('click', (): void => {
   }
 })
 
-// Fallback: respawn in legacy audio mode if SAB-drain fails
-const fallbackToLegacyAudio = async (reason: string): Promise<void> => {
-  // Tear down SAB path
-  try { workletNode?.disconnect() } catch {}
-  try { gainNode?.disconnect() } catch {}
-  workletNode = null
-  gainNode = null
-  // Keep AudioContext open for legacy path (creates its own worklet)
-  // Respawn worker and switch to legacy audio mode
-  const old = worker
-  try { old?.terminate() } catch {}
-  await startLegacyAudioGraph()
-  worker = new Worker(new URL('./workers/nesCore.worker.ts', import.meta.url), { type: 'module' })
-  worker.onmessage = (e: MessageEvent): void => {
-    const d = e.data || {}
-    if (d.type === 'ppu-frame') {
-      if (newFrameAvailable) framesDropped++
-      latestFrame = d.indices as Uint8Array
-      newFrameAvailable = true
-      framesReceived++
-      lastFrameTs = performance.now()
-      drawLatest()
-      newFrameAvailable = false
-    } else if (d.type === 'worker-stats') {
-      onStats(d)
-    } else if (d.type === 'audio-chunk' && legacyNode) {
-      // Forward audio samples to legacy worklet
-      const arr = new Float32Array(d.samples)
-      legacyNode.port.postMessage({ type: 'samples', data: arr }, [arr.buffer])
-    }
-  }
-  worker.onerror = (ev: ErrorEvent): void => { console.error('[worker] error (legacy)', ev.message, ev.error) }
-  worker.onmessageerror = (ev: MessageEvent): void => { console.error('[worker] messageerror (legacy)', ev.data) }
-  const sampleRate = audioCtx?.sampleRate || 48000
-  const channels = 1 // legacy processor duplicates to output
-  worker.postMessage({ type: 'init', sab: null, sampleRate, channels, targetFillFrames: 2048, noAudio: false, useLegacy: true })
-  if (romBytes) {
-    const romCopy = new Uint8Array(romBytes)
-    worker.postMessage({ type: 'load_rom', rom: romCopy, useVT: flags.useVT, strict: flags.strict, apuRegion: (window as any).__apuRegion, apuTiming: (window as any).__apuTiming, apuSynth: (window as any).__apuSynth }, [romCopy.buffer])
-  }
-  worker.postMessage({ type: 'start' })
-  statusEl.textContent = `Running (legacy audio, fallback: ${reason})`
-}
 

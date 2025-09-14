@@ -200,10 +200,13 @@ const startAudioGraph = (): { sab: ReturnType<typeof createAudioSAB> } => {
       onStats(d)
     } else if (d?.type === 'worklet-stats') {
       onStats(d)
-    } else if (d?.type === 'worklet-error') {
+  } else if (d?.type === 'worklet-error') {
       console.warn('[audio] worklet error:', d?.message)
     }
   }
+  
+  // Disable worker-driven drain monitor fallback entirely; rely on explicit SAB-availability logic only.
+  try { worker?.postMessage({ type: 'set-debug', enabled: false }) } catch {}
   
   // Enable stats if requested
   if (options.statsEnabled) {
@@ -450,41 +453,9 @@ startBtn.addEventListener('click', async (): Promise<void> => {
     setTimeout((): void => {
       if (framesReceived === 0 && running && performance.now() - startCheckTs >= 1900) {
         statusEl.textContent = 'No video frames received yet. Enable the Stats overlay and check the console for worker errors.'
-      }
-      // If audio was desired but no worklet stats have arrived and frames are stalled, fall back to video-only
-      if ((sabAvailable && !options.forceNoAudio) && (lastWorkletStatsTs < startCheckTs) && framesReceived <= 1 && running) {
-        console.warn('[audio] suspected stall at startup; switching to legacy audio fallback')
-        void fallbackToLegacyAudio('startup stall')
-      }
+      // Do not auto-fallback to legacy on suspected startup stall when SAB is available.
+      // With proper COOP/COEP headers on Cloudflare Pages, stay on SAB path.
     }, 1800)
-    
-    // Additional check for video-only mode if audio completely fails
-    setTimeout((): void => {
-      if (framesReceived === 0 && running && performance.now() - startCheckTs >= 3000) {
-        console.warn('[video] No frames received after 3s, attempting video-only restart')
-        statusEl.textContent = 'Restarting in video-only mode...'
-        // Force restart without audio
-        worker?.terminate()
-        worker = new Worker(new URL('./workers/nesCore.worker.ts', import.meta.url), { type: 'module' })
-        worker.onmessage = (e: MessageEvent): void => {
-          const d = e.data || {}
-          if (d.type === 'ppu-frame') {
-            if (newFrameAvailable) framesDropped++
-            latestFrame = d.indices as Uint8Array
-            newFrameAvailable = true
-            framesReceived++
-            lastFrameTs = performance.now()
-            if (fastDraw) { drawLatest(); newFrameAvailable = false }
-          }
-        }
-        worker.postMessage({ type: 'init', sab: null, sampleRate: 48000, channels: 1, targetFillFrames: 2048, noAudio: true })
-        if (romBytes) {
-          const romCopy = new Uint8Array(romBytes)
-          worker.postMessage({ type: 'load_rom', rom: romCopy, useVT: flags.useVT, strict: flags.strict, apuRegion: (window as any).__apuRegion, apuTiming: (window as any).__apuTiming, apuSynth: (window as any).__apuSynth }, [romCopy.buffer])
-        }
-        worker.postMessage({ type: 'start' })
-        statusEl.textContent = 'Running (video-only fallback)'
-      }
     }, 3000)
 })
 

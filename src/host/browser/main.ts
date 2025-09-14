@@ -453,10 +453,8 @@ startBtn.addEventListener('click', async (): Promise<void> => {
     setTimeout((): void => {
       if (framesReceived === 0 && running && performance.now() - startCheckTs >= 1900) {
         statusEl.textContent = 'No video frames received yet. Enable the Stats overlay and check the console for worker errors.'
-      // Do not auto-fallback to legacy on suspected startup stall when SAB is available.
-      // With proper COOP/COEP headers on Cloudflare Pages, stay on SAB path.
+      }
     }, 1800)
-    }, 3000)
 })
 
 pauseBtn.addEventListener('click', (): void => {

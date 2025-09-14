@@ -2,6 +2,9 @@ import { NES_PALETTE } from './palette'
 import { createAudioSAB } from './audio/shared-ring-buffer'
 // Import the audio worklet URL at module top (TS + ?url) so it resolves in dev and build
 import nesAudioProcessorUrl from './worklets/nes-audio-processor.ts?url'
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+import NESCoreWorker from './workers/nesCore.worker.ts?worker'
 
 // Query flags (read once; UI controls take precedence)
 const query = new URL(window.location.href).searchParams
@@ -427,9 +430,8 @@ startBtn.addEventListener('click', async (): Promise<void> => {
   }
 // Spawn worker and init (use Vite worker loader for both dev and prod)
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-  // @ts-ignore - Vite will provide a string URL for the worker asset
-  const nesWorkerUrl = (await import('./workers/nesCore.worker.ts?worker&url')).default as string
-  worker = new Worker(nesWorkerUrl, { type: 'module' })
+  // @ts-ignore
+  worker = new (NESCoreWorker as unknown as { new (): Worker })()
   worker.onmessage = (e: MessageEvent): void => {
     const d = e.data || {}
     if (d.type === 'ppu-frame') {

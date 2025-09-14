@@ -1,0 +1,3 @@
+name = "ai-nes-gpt5" # optional, not used by Pages
+
+pages_build_output_dir = "src/host/browser/dist"

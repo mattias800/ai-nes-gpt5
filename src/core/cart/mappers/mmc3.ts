@@ -12,6 +12,7 @@ export interface MMC3Options {
 export class MMC3 implements Mapper {
   private prg: Uint8Array;
   private chr: Uint8Array;
+  private chrIsRam = false;
   private prgRam: Uint8Array;
   private prgRamEnable = false;
   private prgRamWriteProtect = false;
@@ -56,7 +57,8 @@ export class MMC3 implements Mapper {
 
   constructor(prg: Uint8Array, chr: Uint8Array = new Uint8Array(0), opts?: MMC3Options) {
     this.prg = prg;
-    this.chr = chr.length ? chr : new Uint8Array((opts?.chrRamSize || 0x2000));
+    this.chrIsRam = (chr.length === 0);
+    this.chr = this.chrIsRam ? new Uint8Array((opts?.chrRamSize || 0x2000)) : chr;
     const total = Math.max(0, (opts?.prgRamSize ?? 0x2000)) + Math.max(0, (opts?.prgNvramSize ?? 0));
     this.prgRam = new Uint8Array(total || 0x2000);
     this.prgBatteryOffset = Math.max(0, (opts?.prgRamSize ?? 0x2000));
@@ -175,7 +177,7 @@ export class MMC3 implements Mapper {
     return this.chr[this.mapChr(addr & 0x1FFF)];
   }
   ppuWrite(addr: Word, value: Byte): void {
-    this.chr[this.mapChr(addr & 0x1FFF)] = value & 0xFF;
+    if (this.chrIsRam) this.chr[this.mapChr(addr & 0x1FFF)] = value & 0xFF;
   }
 
   irqPending(): boolean { return this.irq; }
@@ -348,12 +350,18 @@ export class MMC3 implements Mapper {
       return map(r5, addr - 0x1C00);
     } else {
       // Invert mapping halves
-      if (addr < 0x0800) return map(r2, addr);
-      if (addr < 0x1000) return map(r3, addr - 0x0800);
-      if (addr < 0x1400) return map(r4, addr - 0x1000);
-      if (addr < 0x1800) return map(r5, addr - 0x1400);
-      if (addr < 0x1C00) return map(r0, addr - 0x1800);
-      return map(r1, addr - 0x1C00);
+      // $0000-$03FF: 1KB @ R2
+      // $0400-$07FF: 1KB @ R3
+      // $0800-$0BFF: 1KB @ R4
+      // $0C00-$0FFF: 1KB @ R5
+      // $1000-$17FF: 2KB @ R0
+      // $1800-$1FFF: 2KB @ R1
+      if (addr < 0x0400) return map(r2, addr);
+      if (addr < 0x0800) return map(r3, addr - 0x0400);
+      if (addr < 0x0C00) return map(r4, addr - 0x0800);
+      if (addr < 0x1000) return map(r5, addr - 0x0C00);
+      if (addr < 0x1800) return map(r0, addr - 0x1000);
+      return map(r1, addr - 0x1800);
     }
   }
 }

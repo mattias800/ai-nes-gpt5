@@ -65,6 +65,8 @@ export class NESSystem {
     this.bus.connectIO(this.io.read, this.io.write);
     this.bus.connectCart((a) => this.cart.readCpu(a), (a, v) => this.cart.writeCpu(a, v));
     this.cpu = new CPU6502(this.bus);
+    // Provide CPU cycle getter to bus for ZP watch timestamps
+    try { (this.bus as any).setCpuCycleProvider?.(() => this.cpu.state.cycles); } catch {}
     this.io.setCpuCycleHooks(() => this.cpu.state.cycles, (n) => this.cpu.addCycles(n));
 
     // Attach APU

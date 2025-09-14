@@ -6,7 +6,7 @@ import { NESSystem } from '../../../core/system/system'
 import { parseINes } from '../../../core/cart/ines'
 import { getWriter, type SabBundle } from '../audio/shared-ring-buffer'
 
-const CPU_HZ = 1789773
+let cpuHz = 1789773
 
 interface InitMsg { type: 'init'; sab?: SabBundle | null; sampleRate: number; channels: number; targetFillFrames: number; noAudio?: boolean; useLegacy?: boolean }
 interface LoadRomMsg { type: 'load_rom'; rom: Uint8Array; useVT: boolean; strict: boolean; apuRegion?: 'NTSC'|'PAL'; apuTiming?: 'integer'|'fractional'; apuSynth?: 'raw'|'blep' }
@@ -111,7 +111,7 @@ const generateInto = (frames: number, buf: Float32Array): number => {
   if (!sys) return 0
   // Clamp sampleRate to sane range to avoid division by zero or NaN
   const sr = (sampleRate && isFinite(sampleRate) && sampleRate > 0) ? sampleRate : 44100
-  const cyclesPerSample = CPU_HZ / sr
+  const cyclesPerSample = cpuHz / sr
   let i = 0
   while (i < frames) {
     state.targetCycles += cyclesPerSample
@@ -380,14 +380,21 @@ case 'load_rom': {
       ;(sys.ppu as unknown as { setTimingMode?: (m: 'vt'|'legacy') => void }).setTimingMode?.(msg.useVT ? 'vt' : 'legacy')
       // Configure APU region and timing if provided (defaults remain NTSC/integer)
       try {
-        const region = (msg.apuRegion === 'PAL' ? 'PAL' : 'NTSC') as 'NTSC'|'PAL'
-        ;(sys.apu as unknown as { setRegion?: (r: 'NTSC'|'PAL') => void }).setRegion?.(region)
+        if (typeof msg.apuRegion !== 'undefined') {
+          const region = (msg.apuRegion === 'PAL' ? 'PAL' : 'NTSC') as 'NTSC'|'PAL'
+          ;(sys.apu as unknown as { setRegion?: (r: 'NTSC'|'PAL') => void }).setRegion?.(region)
+        }
         const timing = (msg.apuTiming === 'fractional' ? 'fractional' : 'integer') as 'integer'|'fractional'
         ;(sys.apu as unknown as { setFrameTimingMode?: (m: 'integer'|'fractional') => void }).setFrameTimingMode?.(timing)
         // Optional band-limited synthesis scaffolding
         useBlep = msg.apuSynth === 'blep'
         if (useBlep) (sys.apu as unknown as { enableBandlimitedSynth?: (v: boolean) => void }).enableBandlimitedSynth?.(true)
       } catch {}
+      // Recompute CPU Hz based on region (NTSC vs PAL)
+      try {
+        const reg = (sys.apu as unknown as { getRegion?: () => 'NTSC'|'PAL' }).getRegion?.() || 'NTSC'
+        cpuHz = (reg === 'PAL') ? 1662607 : 1789773
+      } catch { cpuHz = 1789773 }
       sys.reset()
       sys.io.write(0x2001, 0x1E)
       ;(sys.cpu as unknown as { setIllegalMode?: (m: 'strict'|'lenient') => void }).setIllegalMode?.(msg.strict ? 'strict' : 'lenient')

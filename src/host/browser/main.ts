@@ -171,7 +171,8 @@ if (volumeSlider) {
 
 // Audio setup
 const setupAudio = async (): Promise<void> => {
-  if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 44100 })
+  // Use device sampleRate to avoid resampling and pitch drift
+  if (!audioCtx) audioCtx = new AudioContext()
   if (!audioWorkletLoaded) {
     await audioCtx.audioWorklet.addModule(nesAudioProcessorUrl as unknown as string)
     audioWorkletLoaded = true

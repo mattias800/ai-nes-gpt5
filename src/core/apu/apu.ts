@@ -379,15 +379,20 @@ this.triLength = LENGTH_TABLE[index] | 0;
     return v & 0xFF;
   }
 
+  private apuPhase = 0; // 0/1 flip-flop: channel timers tick on every other CPU cycle
+
   tick(cpuCycles: number) {
-    // Advance triangle timer at CPU cycle granularity
     for (let i = 0; i < cpuCycles; i++) {
-      // Per-CPU-cycle clocks
-      this.clockTriangleTimer();
-      this.clockPulse1Timer();
-      this.clockNoisePeriod();
-      this.clockPulse2Timer();
-      this.clockDmcRate();
+      // Gate per-channel timers at CPU/2 (matches 2A03/2A07 behavior)
+      this.apuPhase ^= 1;
+      if (this.apuPhase === 0) {
+        this.clockTriangleTimer();
+        this.clockPulse1Timer();
+        this.clockNoisePeriod();
+        this.clockPulse2Timer();
+        this.clockDmcRate();
+      }
+
       // If a frame IRQ was scheduled with a delay, count down and assert when it reaches zero
       if (this.frameIrqDelayCounter > 0) {
         this.frameIrqDelayCounter--;
@@ -405,19 +410,17 @@ this.triLength = LENGTH_TABLE[index] | 0;
         }
       }
 
-      // Bump frame counter local time
+      // Bump frame counter local time (still counts CPU cycles)
       this.cycles++;
-
-      // Immediate reset on $4017 write already handled in write4017(); no deferred reset here.
 
       // Process frame sequencer edges using the current mode's sequence
       const seq = this.mode5 ? this.fiveStep : this.fourStep;
       while (this.stepIndex < seq.length && this.cycles >= seq[this.stepIndex]) {
         const idx = this.stepIndex;
-        // Quarter-frame clocks (envelope/linear) occur at every step index
+        // Quarter-frame clocks
         this.clockEnvelopes();
         this.clockTriangleLinear();
-        // Half-frame clocks (length, sweep): for 4-step, at steps 1 and 3; for 5-step, at steps 1 and 4
+        // Half-frame clocks
         if (!this.mode5) {
           if (idx === 1 || idx === 3) { this.clockLengthCounters(); this.clockSweeps(); }
         } else {
@@ -425,7 +428,6 @@ this.triLength = LENGTH_TABLE[index] | 0;
         }
 
         this.stepIndex++;
-        // On 4-step, at end of sequence, set IRQ if not inhibited
         if (!this.mode5 && this.stepIndex === seq.length) {
           if (!this.irqInhibit) {
             if (this.frameIrqAssertDelay > 0) {
@@ -443,11 +445,9 @@ this.triLength = LENGTH_TABLE[index] | 0;
               } catch {}
             }
           }
-          // Wrap sequence
           this.cycles -= seq[seq.length - 1];
           this.stepIndex = 0;
         }
-        // On 5-step, wrap at end with no IRQ
         if (this.mode5 && this.stepIndex === seq.length) {
           this.cycles -= seq[seq.length - 1];
           this.stepIndex = 0;

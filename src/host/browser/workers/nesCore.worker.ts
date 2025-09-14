@@ -214,7 +214,7 @@ const pumpAudio = (): void => {
     }
     return
   }
-  if (!writer) return
+  if (!writer && !noAudio) return
   
   pumpCount++
   if (debugAudio && (pumpCount % 2000 === 0)) {
@@ -242,8 +242,8 @@ const pumpAudio = (): void => {
     return
   }
   
-  // Only produce if we have reasonable free space
-  if (freeNow < audioQuantum) {
+  // Only produce if we have reasonable free space (skip this check if noAudio to allow CPU advance)
+  if (!noAudio && freeNow < audioQuantum) {
     if (debugAudio && (pumpCount % 2000 === 0)) {
       console.log('[worker] skipping pump - insufficient free space:', freeNow, 'need:', audioQuantum)
     }

@@ -13,6 +13,7 @@ import { ColorDreams } from './mappers/colordreams';
 import { Camerica } from './mappers/camerica';
 import { VRC2_4 } from './mappers/vrc2_4';
 import { FME7 } from './mappers/fme7';
+import { MMC5 } from './mappers/mmc5';
 import type { Mapper } from './types';
 
 export class Cartridge {
@@ -64,6 +65,11 @@ export class Cartridge {
         break;
       }
       case 9: this.mapper = new MMC2(rom.prg, rom.chr, chrRamSize); break;
+      case 5: {
+        // MMC5 (Mapper 5)
+        this.mapper = new MMC5(rom.prg, rom.chr, { prgRamSize: prgRamSize ?? 0x2000, prgNvramSize: prgNvramSize ?? 0, chrRamSize });
+        break;
+      }
       case 66: this.mapper = new GNROM(rom.prg, rom.chr, chrRamSize, prgRamSize ?? 0x2000, prgNvramSize ?? 0); break;
       case 69: this.mapper = new FME7(rom.prg, rom.chr, chrRamSize, prgRamSize ?? 0x2000, prgNvramSize ?? 0); break;
       case 71: this.mapper = new Camerica(rom.prg, rom.chr, chrRamSize, prgRamSize ?? 0x2000, prgNvramSize ?? 0); break;

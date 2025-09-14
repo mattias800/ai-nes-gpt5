@@ -34,6 +34,9 @@ export class PPU {
   // Cartridge CHR hooks
   private chrRead: (addr: Word) => Byte = () => 0x00;
   private chrWrite: (addr: Word, value: Byte) => void = () => {};
+  // Optional nametable override hooks (e.g., MMC5)
+  private ntReadOverride: ((addr: Word) => Byte) | null = null;
+  private ntWriteOverride: ((addr: Word, value: Byte) => void) | null = null;
   private onA12Rise: (() => void) | null = null;
   private lastA12 = 0; // previous state of A12 during CHR access
   private a12LastLowDot = 0; // last dot when A12 was observed low
@@ -95,6 +98,42 @@ export class PPU {
 
   connectCHR(read: (addr: Word) => Byte, write: (addr: Word, value: Byte) => void) {
     this.chrRead = read; this.chrWrite = write;
+  }
+
+  // Allow system to install nametable override callbacks from mapper (MMC5)
+  setNametableOverride(read: ((addr: Word) => Byte) | null, write: ((addr: Word, value: Byte) => void) | null): void {
+    this.ntReadOverride = read || null;
+    this.ntWriteOverride = write || null;
+  }
+
+  // Expose direct CIRAM accessors for mapper use (MMC5):
+  //  - read/write: absolute PPU $2000-$2FFF/$3000-$3EFF addressing (mirrored to 2KB)
+  //  - readPage/writePage: page 0/1 with 0..0x3FF offset
+  getCIRAMAccessors(): { read: (addr: Word) => Byte, write: (addr: Word, value: Byte) => void, readPage: (page: 0|1, offset: number) => Byte, writePage: (page: 0|1, offset: number, value: Byte) => void } {
+    const read = (addr: Word): Byte => {
+      const a = addr & 0x3FFF;
+      const vramIndex = (a - 0x2000) & 0x0FFF;
+      const table = (vramIndex >> 10) & 0x03;
+      const offset = vramIndex & 0x03FF;
+      // Map tables 0,2 to page0; 1,3 to page1 (CIRAM physical mapping)
+      const page = (table & 1) as 0|1;
+      return this.vram[(page * 0x400) + offset] & 0xFF;
+    };
+    const write = (addr: Word, value: Byte): void => {
+      const a = addr & 0x3FFF; const v = value & 0xFF;
+      const vramIndex = (a - 0x2000) & 0x0FFF;
+      const table = (vramIndex >> 10) & 0x03;
+      const offset = vramIndex & 0x03FF;
+      const page = (table & 1) as 0|1;
+      this.vram[(page * 0x400) + offset] = v;
+    };
+    const readPage = (page: 0|1, offset: number): Byte => {
+      return this.vram[((page & 1) * 0x400) + (offset & 0x3FF)] & 0xFF;
+    };
+    const writePage = (page: 0|1, offset: number, value: Byte): void => {
+      this.vram[((page & 1) * 0x400) + (offset & 0x3FF)] = value & 0xFF;
+    };
+    return { read, write, readPage, writePage };
   }
 
   setA12Hook(hook: (() => void) | null) { this.onA12Rise = hook; }
@@ -570,6 +609,7 @@ export class PPU {
       return this.chrRead(a);
     }
     if (a < 0x3F00) {
+      if (this.ntReadOverride) return this.ntReadOverride(a);
       const nt = this.mapNametable(a);
       return this.vram[nt];
     }
@@ -589,6 +629,7 @@ export class PPU {
       return;
     }
     if (a < 0x3F00) {
+      if (this.ntWriteOverride) { this.ntWriteOverride(a, value); return; }
       const nt = this.mapNametable(a);
       this.vram[nt] = value;
       return;

@@ -22,6 +22,16 @@ export class NESSystem {
     this.ppu.connectCHR((a) => this.cart.readChr(a), (a, v) => this.cart.writeChr(a, v));
     const mapper: any = (this.cart as any).mapper;
     if (mapper.notifyA12Rise) this.ppu.setA12Hook(() => mapper.notifyA12Rise());
+    // Install mapper-provided nametable override (MMC5) and CIRAM accessors
+    if ((mapper.ppuNTRead || mapper.ppuNTWrite) && (this.ppu as any).setNametableOverride) {
+      const rd = mapper.ppuNTRead ? ((a: number) => mapper.ppuNTRead(a)) : null;
+      const wr = mapper.ppuNTWrite ? ((a: number, v: number) => mapper.ppuNTWrite(a, v)) : null;
+      (this.ppu as any).setNametableOverride(rd, wr);
+    }
+    if (mapper.setCIRAMAccessors && (this.ppu as any).getCIRAMAccessors) {
+      const acc = (this.ppu as any).getCIRAMAccessors();
+      mapper.setCIRAMAccessors(acc.read, acc.write, acc.readPage, acc.writePage);
+    }
     // Set mirroring from iNES flags
     const flags6 = (this as any).cart ? (this as any).cart['rom'].flags6 : 0;
     const four = (flags6 & 0x08) !== 0; const vert = (flags6 & 0x01) !== 0;

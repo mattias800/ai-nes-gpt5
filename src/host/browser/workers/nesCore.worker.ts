@@ -94,6 +94,10 @@ let occMax = 0
 let occSum = 0
 let occCount = 0
 let lastStatsPost = (typeof performance !== 'undefined') ? performance.now() : 0
+// Detailed timing (only meaningful when stats enabled)
+let genMsSum = 0
+let writeMsSum = 0
+let detailCount = 0
 
 const occupancy = (): number => {
   if (!writer) return 0
@@ -160,6 +164,8 @@ const postStatsIfDue = (toProduce: number, occNow: number, t0: number, t1: numbe
         pumpMsAvg,
         pumpMs95p,
         framesPerPumpAvg,
+        genMsAvg: detailCount > 0 ? (genMsSum / detailCount) : 0,
+        writeMsAvg: detailCount > 0 ? (writeMsSum / detailCount) : 0,
         sabOccMin: occMin,
         sabOccAvg: occAvg,
         sabOccMax: occMax,
@@ -169,6 +175,8 @@ const postStatsIfDue = (toProduce: number, occNow: number, t0: number, t1: numbe
         w: extra?.w ?? -1,
       },
     })
+    // reset detail accumulators
+    genMsSum = 0; writeMsSum = 0; detailCount = 0
     lastStatsPost = now
     occMin = Number.POSITIVE_INFINITY
     occMax = 0
@@ -272,9 +280,18 @@ const pumpAudio = (): void => {
     const perBurstCap = ratio > 0.5 ? 192 : 128
     const toProduce = Math.max(audioQuantum, Math.min(perBurstCap, desired))
     const buf = scratch.subarray(0, toProduce * channels)
+    const tg0 = (typeof performance !== 'undefined') ? performance.now() : 0
     generateInto(toProduce, buf)
+    const tg1 = (typeof performance !== 'undefined') ? performance.now() : 0
 
+    const tw0 = tg1
     const written = writer.write(buf)
+    const tw1 = (typeof performance !== 'undefined') ? performance.now() : 0
+
+    // accumulate detail timing when stats enabled
+    genMsSum += Math.max(0, tg1 - tg0)
+    writeMsSum += Math.max(0, tw1 - tw0)
+    detailCount++
     if (written === 0) {
       if (debugAudio) console.warn('[worker] failed to write audio data, freeSpace:', freeNow, 'toProduce:', toProduce)
       break

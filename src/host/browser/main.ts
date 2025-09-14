@@ -128,6 +128,8 @@ const onStats = (data: any): void => {
     stats.set('pump/ms avg', (a.pumpMsAvg ?? 0).toFixed(2))
     stats.set('pump/ms 95p', (a.pumpMs95p ?? 0).toFixed(2))
     stats.set('frames/pump avg', (a.framesPerPumpAvg ?? 0).toFixed(1))
+    if (typeof a.genMsAvg === 'number') stats.set('gen/ms avg', (a.genMsAvg ?? 0).toFixed(2))
+    if (typeof a.writeMsAvg === 'number') stats.set('write/ms avg', (a.writeMsAvg ?? 0).toFixed(2))
     stats.set('SAB occ min/avg/max', `${Math.round(a.sabOccMin ?? 0)}/${Math.round(a.sabOccAvg ?? 0)}/${Math.round(a.sabOccMax ?? 0)}`)
     stats.set('occ now (cons/prod)', `${Math.round(a.occConsumerNow ?? -1)}/${Math.round(a.occProducerNow ?? -1)}`)
     stats.set('rw (r/w)', `${Math.round(a.r ?? -1)}/${Math.round(a.w ?? -1)}`)

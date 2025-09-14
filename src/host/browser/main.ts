@@ -164,7 +164,7 @@ if (volumeSlider) {
 const setupAudio = async (): Promise<void> => {
   if (!audioCtx) audioCtx = new AudioContext({ sampleRate: 44100 })
   if (!audioWorkletLoaded) {
-    await audioCtx.audioWorklet.addModule(new URL('./worklets/nes-audio-processor.ts', import.meta.url))
+await audioCtx.audioWorklet.addModule(new URL('./worklets/nes-audio-processor.js', import.meta.url))
     audioWorkletLoaded = true
   }
 }

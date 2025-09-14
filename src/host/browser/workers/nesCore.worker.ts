@@ -256,20 +256,20 @@ const pumpAudio = (): void => {
   
   // Aim to keep buffer around ~55–60% for steady progression; keep each pump very short
   const fillTarget = Math.max(audioQuantum, Math.floor(targetFillFrames * 0.55))
-  let maxPumpFramesPerCall = 512
-  let maxPumpMs = 2.5
+  let maxPumpFramesPerCall = 1536
+  let maxPumpMs = 6.0
   
   // If we are far behind or elapsed time was long, allow a slightly bigger pump budget (but keep it tight)
   const deficit = Math.max(0, fillTarget - occNow)
   const ratio = fillTarget > 0 ? (deficit / fillTarget) : 0
-  if (ratio > 0.5 || mustProduce > 512) { maxPumpMs = 4.0; maxPumpFramesPerCall = 768 }
+  if (ratio > 0.5 || mustProduce > 512) { maxPumpMs = 8.0; maxPumpFramesPerCall = 2048 }
 
   const targetThisPump = Math.min(maxPumpFramesPerCall, mustProduce + Math.min(deficit, 384))
 
   // Produce audio in very small bursts; enforce time and frame budget per pump
   while (occNow < fillTarget && freeNow >= audioQuantum && bursts < 6 && producedTotal < targetThisPump) {
     const desired = Math.min(freeNow, Math.max(0, fillTarget - occNow), targetThisPump - producedTotal)
-    const perBurstCap = ratio > 0.5 ? 192 : 128
+    const perBurstCap = ratio > 0.5 ? 384 : 256
     const toProduce = Math.max(audioQuantum, Math.min(perBurstCap, desired))
     const buf = scratch.subarray(0, toProduce * channels)
     generateInto(toProduce, buf)

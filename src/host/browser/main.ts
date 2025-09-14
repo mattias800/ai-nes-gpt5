@@ -6,7 +6,7 @@ const query = new URL(window.location.href).searchParams
 const defaultStatsEnabled = query.get('stats') === '1'
 const defaultForceNoAudio = query.get('noaudio') === '1'
 const defaultFastDraw = query.has('fastdraw') ? (query.get('fastdraw') === '1') : true
-const defaultLowLat = query.has('lowlat') ? (query.get('lowlat') === '1') : true
+const defaultLowLat = query.has('lowlat') ? (query.get('lowlat') === '1') : false
 const fillParam = (() => { const v = Number(query.get('fill')); return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0 })()
 
 // Prefer SAB (COOP/COEP) for low-latency audio, but fall back to video-only when unavailable
@@ -433,7 +433,7 @@ startBtn.addEventListener('click', async (): Promise<void> => {
       legacyNode.port.postMessage({ type: 'samples', data: arr }, [arr.buffer])
     }
   }
-  const targetFillFrames = fillParam > 0 ? fillParam : (options.lowLat ? 768 : 1024)
+const targetFillFrames = fillParam > 0 ? fillParam : (options.lowLat ? 768 : 4096)
   worker.postMessage({ type: 'init', sab: sab ? { controlSAB: sab.controlSAB, dataSAB: sab.dataSAB, dataByteOffset: (sab as any).dataByteOffset ?? 0 } : null, sampleRate, channels: 1, targetFillFrames, noAudio: (!sab && !usingLegacy), useLegacy: usingLegacy })
   worker.onerror = (ev: ErrorEvent): void => { console.error('[worker] error', ev.message, ev.error) }
   worker.onmessageerror = (ev: MessageEvent): void => { console.error('[worker] messageerror', ev.data) }
@@ -447,7 +447,7 @@ startBtn.addEventListener('click', async (): Promise<void> => {
   startBtn.disabled = true
   pauseBtn.disabled = false
   pauseBtn.textContent = 'Pause'
-  statusEl.textContent = sab ? 'Running' : (usingLegacy ? 'Running (legacy audio)' : 'Running (no audio)')
+statusEl.textContent = sab ? `Running${options.lowLat ? ' (low-lat)' : ''}` : (usingLegacy ? 'Running (legacy audio)' : 'Running (no audio)')
     // If no frames arrive shortly after start, surface a helpful status to aid debugging.
     const startCheckTs = performance.now()
     setTimeout((): void => {

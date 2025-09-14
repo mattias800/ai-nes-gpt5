@@ -10,6 +10,8 @@ export class NesIO {
   private getCpuCycles: (() => number) | null = null;
   private addCpuCycles: ((n: number) => void) | null = null;
   private apu: import('@core/apu/apu').APU | null = null;
+  // Limit $4014 OAMDMA oneshot output to first occurrence
+  private oamDmaOneshotLogged = false;
 
   constructor(public ppu: PPU, private bus: CPUBus) {}
 
@@ -120,10 +122,11 @@ export class NesIO {
         // One-shot log for DMA initiation (optional)
         try {
           const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
-          if (env && env.ONESHOT_OAMDMA === '1') {
+          if (env && env.ONESHOT_OAMDMA === '1' && !this.oamDmaOneshotLogged) {
             const cyc = this.getCpuCycles ? this.getCpuCycles() : 0;
             // eslint-disable-next-line no-console
             console.log(`[oneshot] $4014 OAMDMA page=$${(value&0xFF).toString(16).padStart(2,'0')} at CPU cyc=${cyc}`);
+            this.oamDmaOneshotLogged = true;
           }
         } catch {}
         this.ppu.oamDMA((a) => this.bus.read(a), value);

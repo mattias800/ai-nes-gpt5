@@ -105,6 +105,7 @@ export class MMC3 implements Mapper {
           console.log(`[mmc3] 8000 sel=$${(value&0xFF).toString(16).padStart(2,'0')} prgMode=${prgMode} chrMode=${chrMode}${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${cpu!==undefined?` cpu=${cpu}`:''}`);
         } catch {}
       }
+      this.logPrgMap('after-8000');
     } else if (addr >= 0x8001 && addr <= 0x9FFF && (addr & 1) === 1) {
       const reg = this.bankSelect & 0x07;
       this.bankRegs[reg] = value;
@@ -117,6 +118,7 @@ export class MMC3 implements Mapper {
           console.log(`[mmc3] 8001 R${reg}=$${(value&0xFF).toString(16).padStart(2,'0')}${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${cpu!==undefined?` cpu=${cpu}`:''}`);
         } catch {}
       }
+      if (reg === 6 || reg === 7) this.logPrgMap('after-8001');
     } else if (addr >= 0xA000 && addr <= 0xBFFE && (addr & 1) === 0) {
       this.mirroring = value & 1;
       if (this.mirrorCb) this.mirrorCb((this.mirroring & 1) ? 'horizontal' : 'vertical');
@@ -158,6 +160,7 @@ export class MMC3 implements Mapper {
           console.log(`[mmc3] E000 disable${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${cpu!==undefined?` cpu=${cpu}`:''}`);
         } catch {}
       }
+      this.logPrgMap('after-E000');
     } else if (addr >= 0xE001 && addr <= 0xFFFF && (addr & 1) === 1) {
       // Enable IRQs immediately on write
       this.irqEnabled = true;
@@ -170,6 +173,7 @@ export class MMC3 implements Mapper {
           console.log(`[mmc3] E001 enable${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${cpu!==undefined?` cpu=${cpu}`:''}`);
         } catch {}
       }
+      this.logPrgMap('after-E001');
     }
   }
 
@@ -304,11 +308,24 @@ export class MMC3 implements Mapper {
     this.dot = 0;
   }
 
+  private logPrgMap(tag: string): void {
+    if (!this.traceEnabled) return;
+    try {
+      const t = this.timeProvider ? this.timeProvider() : null;
+      const cpu = this.cpuCycleProvider ? this.cpuCycleProvider() : undefined;
+      const slots: Word[] = [0x8000, 0xA000, 0xC000, 0xE000];
+      const banks = slots.map(a => (this.mapPrg(a) / 0x2000) | 0);
+      // eslint-disable-next-line no-console
+      console.log(`[mmc3] map ${tag} $8000=${banks[0]} $A000=${banks[1]} $C000=${banks[2]} $E000=${banks[3]}${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${cpu!==undefined?` cpu=${cpu}`:''}`);
+    } catch {}
+  }
+
   private mapPrg(addr: Word): number {
     const mode = (this.bankSelect >> 6) & 1; // PRG mode bit
-    const bank6 = this.bankRegs[6] & 0x3F;
-    const bank7 = this.bankRegs[7] & 0x3F;
     const prgSize = this.prg.length;
+    const prg8kBanks = (prgSize >>> 13) || 1; // number of 8KB banks (avoid div-by-zero)
+    const bank6 = (this.bankRegs[6] & 0x3F) % prg8kBanks;
+    const bank7 = (this.bankRegs[7] & 0x3F) % prg8kBanks;
     const last16k = prgSize - 0x4000;
 
     if (mode === 0) {

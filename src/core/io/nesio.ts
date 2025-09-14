@@ -117,6 +117,15 @@ export class NesIO {
         break;
       }
       case 0x4014: { // OAM DMA
+        // One-shot log for DMA initiation (optional)
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.ONESHOT_OAMDMA === '1') {
+            const cyc = this.getCpuCycles ? this.getCpuCycles() : 0;
+            // eslint-disable-next-line no-console
+            console.log(`[oneshot] $4014 OAMDMA page=$${(value&0xFF).toString(16).padStart(2,'0')} at CPU cyc=${cyc}`);
+          }
+        } catch {}
         this.ppu.oamDMA((a) => this.bus.read(a), value);
         // CPU stalls for 513 or 514 cycles depending on current cycle parity
         if (this.getCpuCycles && this.addCpuCycles) {

@@ -1,5 +1,8 @@
 import type { Byte, Word } from "@core/cpu/types";
 
+// One-shot disassembly provider type: given a memory read, return a formatted line and the PC
+export type DisasmOneShot = (read: (addr: Word) => Byte) => { line: string, pc: number };
+
 export interface BusDevice {
   read(addr: Word): Byte;
   write(addr: Word, value: Byte): void;
@@ -21,6 +24,16 @@ export class CPUBus implements BusDevice {
   private ram = new Uint8Array(0x800); // 2KB internal RAM
   private cpuCycleProvider: (() => number) | null = null;
   public setCpuCycleProvider(fn: () => number): void { this.cpuCycleProvider = fn; }
+
+  // Debug providers for one-shot hooks
+  private pcProvider: (() => number) | null = null;
+  private disasmProvider: DisasmOneShot | null = null;
+  private prgMapProvider: (() => string) | null = null;
+  public setPcProvider(fn: () => number): void { this.pcProvider = fn; }
+  // Provide a function that accepts a readByte(addr) and returns a formatted disassembly row and pc
+  public setDisasmProvider(fn: DisasmOneShot): void { this.disasmProvider = fn; }
+  // Provide a function that returns a formatted PRG map summary string
+  public setPrgMapProvider(fn: () => string): void { this.prgMapProvider = fn; }
   public loadRAM(data: Uint8Array, offset = 0): void {
     const n = Math.min(this.ram.length - (offset|0), data.length)
     if (n > 0) this.ram.set(data.subarray(0, n), offset|0)
@@ -82,6 +95,22 @@ export class CPUBus implements BusDevice {
           if (inWin && addrMatch) {
             // eslint-disable-next-line no-console
             console.log(`[zp] write $${addr.toString(16).padStart(4,'0')} <= $${value.toString(16).padStart(2,'0')} at CPU cyc=${cyc}`)
+          }
+          // One-shot hook: when writing $009A with bit6 set, dump PC, a disasm line, and current PRG mapping
+          if (addr === 0x009A && (value & 0x40) !== 0 && env.TRACE_ZP_ONESHOT_009A === '1') {
+            const pc = this.pcProvider ? (this.pcProvider() & 0xFFFF) : -1;
+            let dis = '';
+            try {
+              if (this.disasmProvider) {
+                const rd = (a: number) => this.read(a & 0xFFFF) & 0xFF;
+                const d = this.disasmProvider(rd);
+                dis = d.line;
+              }
+            } catch {}
+            let map = '';
+            try { if (this.prgMapProvider) map = this.prgMapProvider() || ''; } catch {}
+            // eslint-disable-next-line no-console
+            console.log(`[oneshot] 009A<=${value.toString(16).padStart(2,'0')} pc=$${pc>=0?pc.toString(16).padStart(4,'0'):'????'} ${dis}${map?` ${map}`:''}`);
           }
         }
       } catch {}

@@ -56,6 +56,9 @@ export class PPU {
   private traceEnabled = false;
   private ctrlTrace: { frame: number, scanline: number, cycle: number, ctrl: number }[] = [];
   private maskTrace: { frame: number, scanline: number, cycle: number, mask: number }[] = [];
+  // One-shot VBlank read logging guard
+  private vblOneshotLogged = false;
+  private nmiQueuedOneshotLogged = false;
 
   // Read buffer for $2007
   private readBuffer = 0;
@@ -145,6 +148,15 @@ export class PPU {
   getCtrlLine(): number { return this.ctrlLine & 0xFF; }
   // Expose phase telemetry for diagnostics
   getPhaseTrace(): ReadonlyArray<{ frame: number, scanline: number, cycle: number, ctrl: number, mask: number, emitted?: boolean }> { return this.phaseTrace; }
+
+  // Optional providers for one-shot contextual logging (PC/disasm/PRG map)
+  private pcProvider: (() => number) | null = null;
+  private disasmProvider: (() => { line: string, pc: number }) | null = null;
+  private prgMapProvider: (() => string) | null = null;
+  setPcProvider(fn: (() => number) | null): void { this.pcProvider = fn; }
+  setDisasmProvider(fn: (() => { line: string, pc: number }) | null): void { this.disasmProvider = fn; }
+  setPrgMapProvider(fn: (() => string) | null): void { this.prgMapProvider = fn; }
+
   // Allow tests to switch sampling timing behavior safely
   setTimingMode(mode: 'legacy' | 'vt') { 
     const vt = (mode === 'vt');
@@ -182,6 +194,31 @@ export class PPU {
           value = (value & 0x1F) | seqBit7;
           this.powerOnStatusReadCount++;
         }
+        // One-shot: if VBlank bit is set in returned value, log a contextual event
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.ONESHOT_PPUSTATUS_VBL === '1' && !this.vblOneshotLogged) {
+            if ((value & 0x80) !== 0) {
+              let ctx = '';
+              try {
+                if (this.disasmProvider) {
+                  const d = this.disasmProvider();
+                  ctx += ` pc=$${(d.pc & 0xFFFF).toString(16).padStart(4,'0')} ${d.line}`;
+                } else if (this.pcProvider) {
+                  const pc = this.pcProvider() & 0xFFFF;
+                  ctx += ` pc=$${pc.toString(16).padStart(4,'0')}`;
+                }
+                if (this.prgMapProvider) {
+                  const mp = this.prgMapProvider();
+                  if (mp && mp.length) ctx += ` ${mp}`;
+                }
+              } catch {}
+              // eslint-disable-next-line no-console
+              console.log(`[oneshot] $2002 VBlank read f=${this.frame} s=${this.scanline} c=${this.cycle}${ctx}`);
+              this.vblOneshotLogged = true;
+            }
+          }
+        } catch {}
         // Clear vblank flag and write toggle
         this.status &= ~0x80;
         this.w = 0;
@@ -234,6 +271,8 @@ export class PPU {
     value &= 0xFF;
     switch (addr) {
       case 0x2000: { // PPUCTRL
+        const prevCtrl = this.ctrl & 0xFF;
+        const prevNmiOut = this.nmiOutput;
         this.ctrl = value;
         if (this.traceEnabled) {
           if (this.ctrlTrace.length > 1024) this.ctrlTrace.shift();
@@ -244,16 +283,80 @@ export class PPU {
           } catch {}
         }
         this.t = (this.t & 0xF3FF) | ((value & 0x03) << 10);
-        const prev = this.nmiOutput;
         this.nmiOutput = !!(value & 0x80);
+        // One-shot: log when NMI output flips from 0->1 or 1->0
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.PPU_ONESHOT_NMI_EN === '1') {
+            const prevBit = (prevCtrl >> 7) & 1;
+            const newBit = (value >> 7) & 1;
+            if (prevBit !== newBit) {
+              let ctx = '';
+              try {
+                if (this.disasmProvider) {
+                  const d = this.disasmProvider();
+                  ctx += ` pc=$${(d.pc & 0xFFFF).toString(16).padStart(4,'0')} ${d.line}`;
+                } else if (this.pcProvider) {
+                  const pc = this.pcProvider() & 0xFFFF;
+                  ctx += ` pc=$${pc.toString(16).padStart(4,'0')}`;
+                }
+                if (this.prgMapProvider) {
+                  const mp = this.prgMapProvider();
+                  if (mp && mp.length) ctx += ` ${mp}`;
+                }
+              } catch {}
+              // eslint-disable-next-line no-console
+              console.log(`[oneshot] $2000 NMI ${newBit? 'enable':'disable'} f=${this.frame} s=${this.scanline} c=${this.cycle}${ctx}`);
+            }
+          }
+        } catch {}
+        // Optional toggle log for NMI enable/disable
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.TRACE_PPUCTRL_TOGGLE === '1') {
+            const prevBit = (prevCtrl >> 7) & 1;
+            const newBit = (value >> 7) & 1;
+            if (prevBit !== newBit) {
+              // eslint-disable-next-line no-console
+              console.log(`[ppuctrl] NMI ${newBit? 'EN':'DIS'} at f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
+            }
+          }
+        } catch {}
         // If NMI becomes enabled during VBlank, trigger NMI edge
-        if (!prev && this.nmiOutput && (this.status & 0x80)) {
+        if (!prevNmiOut && this.nmiOutput && (this.status & 0x80)) {
           this.nmiOccurred = true;
         }
         break;
       }
       case 0x2001: { // PPUMASK
+        const prevMask = this.mask & 0xFF;
         this.mask = value;
+        // One-shot: first render enable (bg|sp from 0->nonzero)
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          if (env && env.PPU_ONESHOT_RENDER_EN === '1') {
+            const wasOn = (prevMask & 0x18) !== 0;
+            const nowOn = (value & 0x18) !== 0;
+            if (!wasOn && nowOn) {
+              let ctx = '';
+              try {
+                if (this.disasmProvider) {
+                  const d = this.disasmProvider();
+                  ctx += ` pc=$${(d.pc & 0xFFFF).toString(16).padStart(4,'0')} ${d.line}`;
+                } else if (this.pcProvider) {
+                  const pc = this.pcProvider() & 0xFFFF;
+                  ctx += ` pc=$${pc.toString(16).padStart(4,'0')}`;
+                }
+                if (this.prgMapProvider) {
+                  const mp = this.prgMapProvider();
+                  if (mp && mp.length) ctx += ` ${mp}`;
+                }
+              } catch {}
+              // eslint-disable-next-line no-console
+              console.log(`[oneshot] $2001 render enable f=${this.frame} s=${this.scanline} c=${this.cycle}${ctx}`);
+            }
+          }
+        } catch {}
         if (this.traceEnabled) {
           if (this.maskTrace.length > 1024) this.maskTrace.shift();
           this.maskTrace.push({ frame: this.frame, scanline: this.scanline, cycle: this.cycle, mask: this.mask });
@@ -532,7 +635,32 @@ export class PPU {
         if (this.scanline === 241) {
           // Enter VBlank at scanline 241, cycle 1
           this.status |= 0x80;
-          if (this.nmiOutput) this.nmiOccurred = true;
+          if (this.nmiOutput) {
+            this.nmiOccurred = true;
+            // One-shot: log when NMI is queued by PPU (during VBlank entry)
+            try {
+              const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+              if (env && env.ONESHOT_PPU_NMI_QUEUE === '1' && !this.nmiQueuedOneshotLogged) {
+                let ctx = '';
+                try {
+                  if (this.disasmProvider) {
+                    const d = this.disasmProvider();
+                    ctx += ` pc=$${(d.pc & 0xFFFF).toString(16).padStart(4,'0')} ${d.line}`;
+                  } else if (this.pcProvider) {
+                    const pc = this.pcProvider() & 0xFFFF;
+                    ctx += ` pc=$${pc.toString(16).padStart(4,'0')}`;
+                  }
+                  if (this.prgMapProvider) {
+                    const mp = this.prgMapProvider();
+                    if (mp && mp.length) ctx += ` ${mp}`;
+                  }
+                } catch {}
+                // eslint-disable-next-line no-console
+                console.log(`[oneshot] PPU NMI queued f=${this.frame} s=${this.scanline} c=${this.cycle}${ctx}`);
+                this.nmiQueuedOneshotLogged = true;
+              }
+            } catch {}
+          }
           try {
             const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
             if (env && env.TRACE_PPUSTATUS === '1') {

@@ -5,6 +5,7 @@ import { NesIO } from '@core/io/nesio';
 import { Cartridge } from '@core/cart/cartridge';
 import type { INesRom } from '@core/cart/ines';
 import { APU } from '@core/apu/apu';
+import { disasmAt, formatNestestLine } from '@utils/disasm6502';
 
 export class NESSystem {
   public bus: CPUBus;
@@ -21,6 +22,24 @@ export class NESSystem {
     this.cart = new Cartridge(rom);
     this.ppu = new PPU();
     this.ppu.connectCHR((a) => this.cart.readChr(a), (a, v) => this.cart.writeChr(a, v));
+    // Wire PC/disasm/PRG map providers into PPU for one-shot logs
+    try {
+      const mapper: any = (this.cart as any).mapper;
+      this.ppu.setPcProvider(() => this.cpu.state.pc & 0xFFFF);
+      this.ppu.setDisasmProvider(() => {
+        const res = disasmAt((addr: number) => this.bus.read(addr & 0xFFFF) & 0xFF, this.cpu.state.pc & 0xFFFF);
+        const line = formatNestestLine(this.cpu.state.pc & 0xFFFF, res, { a: this.cpu.state.a, x: this.cpu.state.x, y: this.cpu.state.y, p: this.cpu.state.p, s: this.cpu.state.s }, this.cpu.state.cycles);
+        return { line, pc: this.cpu.state.pc & 0xFFFF };
+      });
+      this.ppu.setPrgMapProvider(() => {
+        try {
+          if (!mapper || typeof mapper['mapPrg'] !== 'function') return '';
+          const slots = [0x8000, 0xA000, 0xC000, 0xE000];
+          const banks = slots.map(a => ((mapper.mapPrg(a) / 0x2000) | 0));
+          return `[map] $8000=${banks[0]} $A000=${banks[1]} $C000=${banks[2]} $E000=${banks[3]}`;
+        } catch { return ''; }
+      });
+    } catch {}
     const mapper: any = (this.cart as any).mapper;
     if (mapper.notifyA12Rise) this.ppu.setA12Hook(() => mapper.notifyA12Rise());
     // Install mapper-provided nametable override (MMC5) and CIRAM accessors
@@ -68,6 +87,36 @@ export class NESSystem {
     // Provide CPU cycle getter to bus for ZP watch timestamps
     try { (this.bus as any).setCpuCycleProvider?.(() => this.cpu.state.cycles); } catch {}
     this.io.setCpuCycleHooks(() => this.cpu.state.cycles, (n) => this.cpu.addCycles(n));
+
+    // Wire one-shot $009A hook providers (PC, disasm, PRG mapping summary)
+    try {
+      const busAny: any = this.bus as any;
+      const cartAny: any = this.cart as any;
+      const mapper: any = cartAny.mapper;
+      try { if (busAny.setPcProvider) busAny.setPcProvider(() => this.cpu.state.pc & 0xFFFF); } catch {}
+      try {
+        if (busAny.setDisasmProvider) {
+          busAny.setDisasmProvider((read: (addr: number) => number) => {
+            const pc = this.cpu.state.pc & 0xFFFF;
+            const res = disasmAt(read as any, pc);
+            const line = formatNestestLine(pc, res, { a: this.cpu.state.a, x: this.cpu.state.x, y: this.cpu.state.y, p: this.cpu.state.p, s: this.cpu.state.s }, this.cpu.state.cycles);
+            return { line, pc };
+          });
+        }
+      } catch {}
+      try {
+        if (busAny.setPrgMapProvider) {
+          busAny.setPrgMapProvider(() => {
+            try {
+              if (!mapper || typeof (mapper as any)['mapPrg'] !== 'function') return '';
+              const slots = [0x8000, 0xA000, 0xC000, 0xE000];
+              const banks = slots.map(a => (((mapper as any).mapPrg(a) / 0x2000) | 0));
+              return `[map] $8000=${banks[0]} $A000=${banks[1]} $C000=${banks[2]} $E000=${banks[3]}`;
+            } catch { return ''; }
+          });
+        }
+      } catch {}
+    } catch {}
 
     // Attach APU
     this.apu = new APU();
@@ -227,6 +276,30 @@ export class NESSystem {
 
     // Deliver NMI if VBlank started during PPU tick
     if (this.ppu.nmiOccurred && this.ppu.nmiOutput) {
+      try {
+        const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+        if (env && env.ONESHOT_NMI_ENTRY === '1') {
+          const pc = this.cpu.state.pc & 0xFFFF;
+          let ctx = '';
+          try {
+            const res = disasmAt((addr: number) => this.bus.read(addr & 0xFFFF) & 0xFF, pc);
+            const line = formatNestestLine(pc, res, { a: this.cpu.state.a, x: this.cpu.state.x, y: this.cpu.state.y, p: this.cpu.state.p, s: this.cpu.state.s }, this.cpu.state.cycles);
+            ctx += ` ${line}`;
+          } catch {}
+          try {
+            const mapperAny: any = (this.cart as any).mapper;
+            if (mapperAny && typeof mapperAny['mapPrg'] === 'function') {
+              const slots = [0x8000, 0xA000, 0xC000, 0xE000];
+              const banks = slots.map(a => ((mapperAny.mapPrg(a) / 0x2000) | 0));
+              ctx += ` [map] $8000=${banks[0]} $A000=${banks[1]} $C000=${banks[2]} $E000=${banks[3]}`;
+            }
+          } catch {}
+          const I = ((this.cpu.state.p & 0x04) !== 0) ? 1 : 0;
+          const f = this.ppu.frame, s = this.ppu.scanline, c = this.ppu.cycle;
+          // eslint-disable-next-line no-console
+          console.log(`[oneshot] NMI-entry f=${f} s=${s} c=${c} I=${I} pc=$${pc.toString(16).padStart(4,'0')}${ctx}`);
+        }
+      } catch {}
       this.cpu.requestNMI();
       this.ppu.nmiOccurred = false;
     }

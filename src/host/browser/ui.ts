@@ -100,7 +100,7 @@ document.addEventListener('fullscreenchange', fsUpdate)
 fsUpdate()
 
 // Game info parsing (UI-only, reads iNES/NES 2.0 header)
-interface GameInfo { title: string; prgRomBytes: number; chrRomBytes: number; mapper: number; mapperName: string; hasBattery: boolean; mirroring: 'Horizontal'|'Vertical'|'Four-screen'; isNES2: boolean; submapper?: number }
+interface GameInfo { title: string; prgRomBytes: number; chrRomBytes: number; mapper: number; mapperName: string; hasBattery: boolean; mirroring: 'Horizontal'|'Vertical'|'Four-screen'; isNES2: boolean; submapper: number | undefined }
 
 const mapperName = (id: number): string => {
   const m: Record<number, string> = {

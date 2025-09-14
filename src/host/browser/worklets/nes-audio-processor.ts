@@ -12,6 +12,8 @@ const H = {
   LastOccupancy: 6,
 };
 
+declare const currentTime: number
+
 class NesAudioProcessor extends AudioWorkletProcessor {
   private _control: Int32Array;
   private _data: Float32Array;
@@ -155,5 +157,5 @@ class NesAudioProcessor extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor('nes-audio-processor', NesAudioProcessor);
+registerProcessor('nes-audio-processor', NesAudioProcessor)
 

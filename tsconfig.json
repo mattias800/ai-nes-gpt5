@@ -20,8 +20,8 @@
       "@utils/*": ["src/utils/*"]
     },
     "types": ["vitest/globals", "node"],
-    "lib": ["ES2022", "DOM", "WebWorker"]
+    "lib": ["ES2022", "DOM", "WebWorker", "WebWorker.ImportScripts"]
   },
-  "include": ["src", "tests", "scripts", "vitest.config.ts"],
+  "include": ["src", "vitest.config.ts"],
   "exclude": ["dist", "node_modules"]
 }

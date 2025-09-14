@@ -189,7 +189,7 @@ export class PPU {
         // Optional debug: trace PPUSTATUS reads
         try {
           const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
-          if (env && env.TRACE_PPUSTATUS === '1') {
+          if (env && env.TRACE_PPUSTATUS === '1' && env.PPU_TRACE_VBL_ONLY !== '1') {
             // eslint-disable-next-line no-console
             console.log(`[ppu] read $2002 value=$${(value & 0xFF).toString(16).padStart(2,'0')} at f=${this.frame} sl=${this.scanline} cyc=${this.cycle}`);
           }

@@ -23,7 +23,26 @@ export class NesIO {
 
   read = (addr: Word): Byte => {
     switch (addr) {
-      case 0x2002:
+      case 0x2002: {
+        const v = this.ppu.cpuRead(addr);
+        // Optional targeted trace for $2002 reads with CPU cycles window
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          const cyc = this.getCpuCycles ? this.getCpuCycles() : 0;
+          const enable = env && (env.TRACE_PPUSTATUS_IO === '1');
+          const win = env?.TRACE_READ_WINDOW as string | undefined;
+          let inWin = true;
+          if (win) {
+            const m = /^(\d+)-(\d+)$/.exec(win);
+            if (m) { const a = parseInt(m[1], 10) | 0; const b = parseInt(m[2], 10) | 0; inWin = cyc >= a && cyc <= b; }
+          }
+          if (enable && inWin) {
+            // eslint-disable-next-line no-console
+            console.log(`[io] read $2002 => $${(v&0xFF).toString(16).padStart(2,'0')} at CPU cyc=${cyc}`);
+          }
+        } catch {}
+        return v;
+      }
       case 0x2004:
       case 0x2007:
         return this.ppu.cpuRead(addr);

@@ -47,18 +47,22 @@ async function main() {
   const maxInst = args.max > 0 ? args.max : Number.MAX_SAFE_INTEGER
   const deadline = args.seconds > 0 ? ((typeof performance !== 'undefined' ? performance.now() : Date.now()) + args.seconds * 1000) : Number.POSITIVE_INFINITY
 
+  const silent = (getEnv('TRACE_SILENT') === '1')
+
   let i = 0
   while (i < maxInst) {
     const now = (typeof performance !== 'undefined' ? performance.now() : Date.now())
     if (now >= deadline) break
     const pc = cpu.state.pc & 0xFFFF
     const dis = disasmAt((addr: number) => bus.read(addr), pc)
-    if (args.cyclesOnly) {
-      const cyc = String(cpu.state.cycles).padStart(3, ' ')
-      console.log(`CYC:${cyc}`)
-    } else {
-      const line = formatNestestLine(pc, dis, { a: cpu.state.a, x: cpu.state.x, y: cpu.state.y, p: cpu.state.p, s: cpu.state.s }, cpu.state.cycles)
-      console.log(line)
+    if (!silent) {
+      if (args.cyclesOnly) {
+        const cyc = String(cpu.state.cycles).padStart(3, ' ')
+        console.log(`CYC:${cyc}`)
+      } else {
+        const line = formatNestestLine(pc, dis, { a: cpu.state.a, x: cpu.state.x, y: cpu.state.y, p: cpu.state.p, s: cpu.state.s }, cpu.state.cycles)
+        console.log(line)
+      }
     }
     sys.stepInstruction()
     i++

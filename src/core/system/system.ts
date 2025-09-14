@@ -14,6 +14,7 @@ export class NESSystem {
   public cart: Cartridge;
   public apu: APU;
   private _lastIrqLine = false;
+  private _lastVblank = false;
 
   constructor(rom: INesRom) {
     this.bus = new CPUBus();
@@ -59,6 +60,7 @@ export class NESSystem {
       }
       return eff & 0xFF;
     });
+    if (mapper.setCpuCycleProvider) mapper.setCpuCycleProvider(() => this.cpu.state.cycles);
     this.io = new NesIO(this.ppu, this.bus);
     this.bus.connectIO(this.io.read, this.io.write);
     this.bus.connectCart((a) => this.cart.readCpu(a), (a, v) => this.cart.writeCpu(a, v));
@@ -116,6 +118,7 @@ export class NESSystem {
     this.ppu.reset();
     this.cart.reset();
     this.apu.reset();
+    this._lastVblank = false;
     // Reinstall CPU read hook for DMC after APU reset cleared it
     this.apu.setCpuRead((addr) => this.bus.read(addr & 0xFFFF));
   }
@@ -186,7 +189,22 @@ export class NESSystem {
     });
 
     // Execute one CPU instruction; all cycles (bus + internal) will tick PPU/APU via the per-cycle hook.
+    const prevVb = (this.ppu.status & 0x80) !== 0;
     this.cpu.step();
+    // VBlank edge logging with CPU cycle timestamp (optional)
+    try {
+      const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+      if (env && env.TRACE_VBL_CPU === '1') {
+        const vb = (this.ppu.status & 0x80) !== 0;
+        if (!prevVb && vb) {
+          // eslint-disable-next-line no-console
+          console.log(`[vbl] set CPU_cyc=${this.cpu.state.cycles} f=${this.ppu.frame} sl=${this.ppu.scanline} ppu_cyc=${this.ppu.cycle}`);
+        } else if (prevVb && !vb) {
+          // eslint-disable-next-line no-console
+          console.log(`[vbl] clr CPU_cyc=${this.cpu.state.cycles} f=${this.ppu.frame} sl=${this.ppu.scanline} ppu_cyc=${this.ppu.cycle}`);
+        }
+      }
+    } catch {}
 
     // Apply any APU-induced CPU stalls (e.g., DMC DMA fetches) behind an opt-in env flag
     try {

@@ -31,9 +31,11 @@ export class MMC3 implements Mapper {
 
   // Telemetry (opt-in via env MMC3_TRACE=1)
   private traceEnabled = false;
+  private traceA12Enabled = false; // gate noisy A12 console logs behind env var
   private trace: Array<{ type: string, a?: number, v?: number, ctr?: number, en?: boolean, f?: number, s?: number, c?: number, ctrl?: number }> = [];
   private timeProvider: (() => { frame: number, scanline: number, cycle: number }) | null = null;
   private ctrlProvider: (() => number) | null = null;
+  private cpuCycleProvider: (() => number) | null = null;
   // Optional behavior: assert IRQ on reload-to-zero (latch==0) to model 1-clocking behaviour
   private assertOnRel0 = false;
   private addTrace(entry: { type: string, a?: number, v?: number, ctr?: number, en?: boolean, ctrl?: number }) {
@@ -61,6 +63,7 @@ export class MMC3 implements Mapper {
     try {
       const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
       if (env && env.MMC3_TRACE === '1') this.traceEnabled = true;
+      if (env && env.MMC3_TRACE_A12 === '1') this.traceA12Enabled = true;
       if (env && (env.MMC3_ASSERT_ON_RELOAD_ZERO === '1' || env.MMC3_1_CLOCK === '1')) this.assertOnRel0 = true;
     } catch {}
     if (opts && typeof opts.assertOnRel0 === 'boolean') this.assertOnRel0 = !!opts.assertOnRel0;
@@ -88,12 +91,30 @@ export class MMC3 implements Mapper {
       return;
     }
     if (addr >= 0x8000 && addr <= 0x9FFE && (addr & 1) === 0) {
-      this.bankSelect = value & 0x07 | ((value & 0x40) ? 0x40 : 0) | ((value & 0x80) ? 0x80 : 0);
+      this.bankSelect = (value & 0x07) | ((value & 0x40) ? 0x40 : 0) | ((value & 0x80) ? 0x80 : 0);
       this.addTrace({ type: '8000', a: addr, v: value });
+      if (this.traceEnabled) {
+        try {
+          const t = this.timeProvider ? this.timeProvider() : null;
+          const prgMode = ((this.bankSelect >> 6) & 1);
+          const chrMode = ((this.bankSelect >> 7) & 1);
+          const cpu = this.cpuCycleProvider ? this.cpuCycleProvider() : undefined;
+          // eslint-disable-next-line no-console
+          console.log(`[mmc3] 8000 sel=$${(value&0xFF).toString(16).padStart(2,'0')} prgMode=${prgMode} chrMode=${chrMode}${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${cpu!==undefined?` cpu=${cpu}`:''}`);
+        } catch {}
+      }
     } else if (addr >= 0x8001 && addr <= 0x9FFF && (addr & 1) === 1) {
       const reg = this.bankSelect & 0x07;
       this.bankRegs[reg] = value;
       this.addTrace({ type: '8001', a: reg, v: value });
+      if (this.traceEnabled) {
+        try {
+          const t = this.timeProvider ? this.timeProvider() : null;
+          const cpu = this.cpuCycleProvider ? this.cpuCycleProvider() : undefined;
+          // eslint-disable-next-line no-console
+          console.log(`[mmc3] 8001 R${reg}=$${(value&0xFF).toString(16).padStart(2,'0')}${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${cpu!==undefined?` cpu=${cpu}`:''}`);
+        } catch {}
+      }
     } else if (addr >= 0xA000 && addr <= 0xBFFE && (addr & 1) === 0) {
       this.mirroring = value & 1;
       if (this.mirrorCb) this.mirrorCb((this.mirroring & 1) ? 'horizontal' : 'vertical');
@@ -130,8 +151,9 @@ export class MMC3 implements Mapper {
       if (this.traceEnabled) {
         try {
           const t = this.timeProvider ? this.timeProvider() : null;
+          const cpu = this.cpuCycleProvider ? this.cpuCycleProvider() : undefined;
           // eslint-disable-next-line no-console
-          console.log(`[mmc3] E000 disable${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`);
+          console.log(`[mmc3] E000 disable${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${cpu!==undefined?` cpu=${cpu}`:''}`);
         } catch {}
       }
     } else if (addr >= 0xE001 && addr <= 0xFFFF && (addr & 1) === 1) {
@@ -141,8 +163,9 @@ export class MMC3 implements Mapper {
       if (this.traceEnabled) {
         try {
           const t = this.timeProvider ? this.timeProvider() : null;
+          const cpu = this.cpuCycleProvider ? this.cpuCycleProvider() : undefined;
           // eslint-disable-next-line no-console
-          console.log(`[mmc3] E001 enable${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`);
+          console.log(`[mmc3] E001 enable${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${cpu!==undefined?` cpu=${cpu}`:''}`);
         } catch {}
       }
     }
@@ -197,7 +220,7 @@ export class MMC3 implements Mapper {
       this.irqCounter = (this.irqCounter - 1) & 0xFF;
       op = 'dec';
     }
-    if (this.traceEnabled) {
+    if (this.traceEnabled && this.traceA12Enabled) {
       try {
         // eslint-disable-next-line no-console
         console.log(`[mmc3] A12 rise: op=${op} latch=${this.irqLatch} ctrBefore=${ctrBefore} ctrAfter=${this.irqCounter} en=${this.irqEnabled?1:0} reloadPend=${this.reloadPending?1:0}`);
@@ -217,7 +240,7 @@ export class MMC3 implements Mapper {
         this.irq = true;
         this.addTrace({ type: 'IRQ' });
         if (this.traceEnabled) {
-          try { /* eslint-disable no-console */ console.log(`[mmc3] IRQ assert${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}`); /* eslint-enable no-console */ } catch {}
+          try { /* eslint-disable no-console */ console.log(`[mmc3] IRQ assert${t?` @[f${t.frame}s${t.scanline}c${t.cycle}]`:''}${this.cpuCycleProvider?` cpu=${this.cpuCycleProvider()}`:''}`); /* eslint-enable no-console */ } catch {}
         }
       } else if (decToZero && !this.irqEnabled) {
         this.addTrace({ type: 'DEC0MISS' });
@@ -229,7 +252,7 @@ export class MMC3 implements Mapper {
     (entry as any).op = op;
     (entry as any).pre = onPreRender;
     this.addTrace(entry);
-    if (this.traceEnabled) {
+    if (this.traceEnabled && this.traceA12Enabled) {
       try { /* eslint-disable no-console */ console.log(`[mmc3] A12 op=${op} ctr=${this.irqCounter} en=${this.irqEnabled?1:0} pre=${onPreRender?1:0}`); /* eslint-enable no-console */ } catch {}
     }
   }
@@ -247,6 +270,7 @@ export class MMC3 implements Mapper {
     this.timeProvider = fn;
   }
   setCtrlProvider(fn: () => number): void { this.ctrlProvider = fn; }
+  setCpuCycleProvider(fn: () => number): void { this.cpuCycleProvider = fn; }
 
   getBatteryRam(): Uint8Array | null {
     const size = this.prgRam.length - this.prgBatteryOffset;

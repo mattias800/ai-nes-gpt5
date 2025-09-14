@@ -415,8 +415,11 @@ startBtn.addEventListener('click', async (): Promise<void> => {
       usingLegacy = false
     }
   }
-  // Spawn worker and init
-  worker = new Worker(new URL('./workers/nesCore.worker.ts', import.meta.url), { type: 'module' })
+// Spawn worker and init (use Vite worker loader URL to avoid bundling deopts)
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore - Vite will provide a string URL for the worker asset
+  const nesWorkerUrl = (await import('./workers/nesCore.worker.ts?worker&url')).default as string
+  worker = new Worker(nesWorkerUrl, { type: 'module' })
   worker.onmessage = (e: MessageEvent): void => {
     const d = e.data || {}
     if (d.type === 'ppu-frame') {

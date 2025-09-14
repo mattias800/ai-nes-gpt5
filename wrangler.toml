@@ -1,9 +1,8 @@
-name = "ai-nes-gpt5"
+name = "ai-nes-gpt5" # optional, not used by Pages
 
 # Cloudflare Pages output directory (Vite root outputs here)
 pages_build_output_dir = "src/host/browser/dist"
 
-# Note: Build command must be set in the Cloudflare Pages UI to:
-#   npm run build:host
-# The Pages wrangler.toml does not support a [build] section.
-
+[build]
+# Use the browser host build (do not run `npm run build` which type-checks entire repo)
+command = "npm run build:host"

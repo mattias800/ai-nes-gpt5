@@ -6,6 +6,9 @@ import path from 'node:path'
 export default defineConfig({
   root: 'src/host/browser',
   appType: 'spa',
+  build: {
+    minify: false,
+  },
   // Use repo base when building for GitHub Pages
   base: process.env.GITHUB_PAGES ? '/ai-nes-gpt5/' : '/',
   plugins: [tsconfigPaths()],

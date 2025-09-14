@@ -90,9 +90,32 @@ export class NesIO {
       case 0x2004:
       case 0x2005:
       case 0x2006:
-      case 0x2007:
+      case 0x2007: {
+        // Optional targeted trace for PPU register writes within a cycles window and address filter
+        try {
+          const env = (typeof process !== 'undefined' ? (process as any).env : undefined);
+          const enable = env && env.TRACE_PPU_IO_WRITES === '1';
+          const cyc = this.getCpuCycles ? this.getCpuCycles() : 0;
+          const win = env?.TRACE_WRITE_WINDOW as string | undefined;
+          const addrs = env?.TRACE_WRITE_ADDRS as string | undefined;
+          let inWin = true;
+          if (win) {
+            const m = /^(\d+)-(\d+)$/.exec(win);
+            if (m) { const a = parseInt(m[1], 10) | 0; const b = parseInt(m[2], 10) | 0; inWin = cyc >= a && cyc <= b; }
+          }
+          let addrMatch = true;
+          if (addrs) {
+            const set = new Set(addrs.split(',').map(s => parseInt(s.trim(), 16) & 0xFFFF));
+            addrMatch = set.has(addr & 0xFFFF);
+          }
+          if (enable && inWin && addrMatch) {
+            // eslint-disable-next-line no-console
+            console.log(`[io] write $${(addr&0xFFFF).toString(16).padStart(4,'0')} <= $${(value&0xFF).toString(16).padStart(2,'0')} at CPU cyc=${cyc}`);
+          }
+        } catch {}
         this.ppu.cpuWrite(addr, value);
         break;
+      }
       case 0x4014: { // OAM DMA
         this.ppu.oamDMA((a) => this.bus.read(a), value);
         // CPU stalls for 513 or 514 cycles depending on current cycle parity

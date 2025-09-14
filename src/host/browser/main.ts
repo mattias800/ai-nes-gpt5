@@ -1,7 +1,9 @@
 import { NES_PALETTE } from './palette'
 import { createAudioSAB } from './audio/shared-ring-buffer'
 // Import the audio worklet URL at module top (TS + ?url) so it resolves in dev and build
-import nesAudioProcessorUrl from './worklets/nes-audio-processor.ts?url'
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+import nesAudioProcessorUrl from './worklets/nes-audio-processor.js?url'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
 import NESCoreWorker from './workers/nesCore.worker.ts?worker'

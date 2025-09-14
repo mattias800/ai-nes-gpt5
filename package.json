@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "vite build",
     "test": "cross-env PPU_TIMING_DEFAULT=vt vitest run --coverage",
     "test:fast": "cross-env PPU_TIMING_DEFAULT=vt vitest run --config vitest.fast.config.ts",
     "test:slow": "cross-env SMB3_BASELINE_CRC= SMB3_DEEP_BASELINE_CRC= PPU_TIMING_DEFAULT=vt vitest run tests/slow/**/*.test.ts",
@@ -12,7 +12,8 @@
     "test:blargg:quick": "cross-env BLARGG_QUICK=1 PPU_TIMING_DEFAULT=vt vitest run --config vitest.slow.config.ts",
     "verify": "npm run test:fast && npm run test:slow",
       "dev": "vite",
-      "build:host": "vite build",
+    "build:host": "vite build",
+    "build:ts": "tsc -p tsconfig.build.json",
       "preview": "vite preview",
       "predeploy": "cross-env GITHUB_PAGES=1 vite build",
       "deploy": "gh-pages -d src/host/browser/dist -b gh-pages",
